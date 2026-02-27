@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+
+# next.js / build output
+.next/
+.next*/
+out/
+dist/
+*.tsbuildinfo
+
+# environment
+.env
+.env.*
+
+# local tooling/cache
+.vercel/
+.ruff_cache/
+.trash/
+.agent-mail-project-id
+.agent-mail.yaml
+
+# local runtime databases and artifacts
+storage.sqlite3
+storage.sqlite3-shm
+storage.sqlite3-wal
+a.out
+
+# os/editor noise
+.DS_Store
+._*
+*.pem
+
+# debug logs
+npm-debug.log*
+
+# test reports & artifacts
+tests/reports/
+test-results/
+playwright-report/
