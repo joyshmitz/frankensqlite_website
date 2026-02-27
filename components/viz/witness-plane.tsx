@@ -26,7 +26,7 @@ export default function WitnessPlane() {
   // Nodes for the graph
   const nodes = [
     { id: "T1", label: "Txn 1", pos: { x: 50, y: 120 }, color: "border-blue-500 text-blue-400 bg-blue-500/10" },
-    { id: "T2", label: "Txn 2 (Pivot)", pos: { x: 200, y: 120 }, color: "border-amber-500 text-amber-400 bg-amber-500/10" },
+    { id: "T2", label: "Txn 2", pos: { x: 200, y: 120 }, color: "border-amber-500 text-amber-400 bg-amber-500/10" },
     { id: "T3", label: "Txn 3", pos: { x: 350, y: 120 }, color: "border-purple-500 text-purple-400 bg-purple-500/10" },
   ];
 
@@ -57,7 +57,8 @@ export default function WitnessPlane() {
         
         {/* Viz Area */}
         <div className="flex-1 relative flex items-center justify-center min-h-[220px]">
-           <div className="relative w-full max-w-[450px] h-[240px]">
+           <div className="w-full overflow-x-auto touch-pan-x scrollbar-hide flex items-center justify-center h-full">
+             <div className="relative w-[450px] md:w-full max-w-[450px] h-[240px] shrink-0">
               
               {/* Draw Edges */}
               <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ overflow: 'visible' }}>
@@ -109,7 +110,7 @@ export default function WitnessPlane() {
                     style={{ left: node.pos.x, top: node.pos.y }}
                     animate={isAborted ? { scale: 0.9, opacity: 0.5, borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,0.1)", color: "#ef4444" } : { scale: 1 }}
                   >
-                    <span className="font-bold">{node.label}</span>
+                    <span className="text-xs font-bold">{node.label}</span>
                     {isPivot && step >= 2 && !isAborted && (
                       <span className="text-[8px] font-black uppercase tracking-widest text-red-400 mt-1 bg-red-950/50 px-1 rounded">Pivot</span>
                     )}
@@ -137,6 +138,7 @@ export default function WitnessPlane() {
                 )}
               </AnimatePresence>
 
+             </div>
            </div>
         </div>
 
@@ -150,20 +152,20 @@ export default function WitnessPlane() {
 
         {/* Controls */}
         <div className="flex justify-between items-center border-t border-white/10 pt-4">
-          <button onClick={reset} className="text-xs font-bold text-slate-500 hover:text-white transition-colors">Reset</button>
+          <button onClick={reset} className="text-xs font-bold text-slate-500 hover:text-white transition-colors focus-visible:ring-2 focus-visible:ring-teal-500/50 outline-none rounded px-2 py-1">Reset</button>
           
           <div className="flex gap-2">
             <button 
               onClick={prevStep} 
               disabled={step === 0}
-              className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-white/5 text-xs font-bold transition-all"
+              className="px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-white/5 text-xs font-bold transition-all focus-visible:ring-2 focus-visible:ring-teal-500/50 outline-none"
             >
               Back
             </button>
             <button 
               onClick={nextStep}
               disabled={step === 3}
-              className="px-4 py-2 rounded-lg bg-teal-500 text-black hover:bg-teal-400 disabled:opacity-30 disabled:hover:bg-teal-500 text-xs font-black transition-all"
+              className="px-4 py-2 rounded-lg bg-teal-500 text-black hover:bg-teal-400 disabled:opacity-30 disabled:hover:bg-teal-500 text-xs font-black transition-all focus-visible:ring-2 focus-visible:ring-teal-500/50 outline-none"
             >
               {step === 3 ? "Protected" : "Next Event"}
             </button>

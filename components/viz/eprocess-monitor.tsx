@@ -6,6 +6,7 @@ import VizContainer from "./viz-container";
 import { Activity, ShieldCheck, ShieldAlert } from "lucide-react";
 import { FrankenJargon } from "@/components/franken-jargon";
 import { VizExposition } from "./viz-exposition";
+import { useSite } from "@/lib/site-state";
 
 interface DataPoint {
   id: number;
@@ -14,6 +15,7 @@ interface DataPoint {
 }
 
 export default function EprocessMonitor() {
+  const { playSfx } = useSite();
   const [data, setData] = useState<DataPoint[]>([]);
   const [eValue, setEValue] = useState(1);
   const [isSimulating, setIsSimulating] = useState(false);
@@ -91,8 +93,15 @@ export default function EprocessMonitor() {
         {/* Header Controls */}
         <div className="flex justify-between items-center z-10 border-b border-white/10 pb-4">
            <button 
-             onClick={() => hasFailed ? reset() : setIsSimulating(!isSimulating)}
-             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+             onClick={() => {
+               playSfx("click");
+               if (hasFailed) {
+                 reset();
+               } else {
+                 setIsSimulating(!isSimulating);
+               }
+             }}
+             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all focus-visible:ring-2 focus-visible:ring-teal-500/50 outline-none ${
                hasFailed ? 'bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30' : 
                isSimulating ? 'bg-amber-500/20 text-amber-400 border border-amber-500/50' : 
                'bg-teal-500 text-black border border-teal-400 hover:bg-teal-400'

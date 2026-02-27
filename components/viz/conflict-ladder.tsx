@@ -396,7 +396,7 @@ function DecisionNode({
     fail: { bg: "#2a0a0a", border: "#ef4444", text: "#fca5a5" },
   };
   const c = active ? colorMap[variant] : { bg: "#111318", border: "#1e293b", text: "#475569" };
-  const w = 140;
+  const w = 160;
   const h = 30;
 
   return (

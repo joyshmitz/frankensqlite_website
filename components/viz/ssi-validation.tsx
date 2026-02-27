@@ -110,7 +110,7 @@ export default function SsiValidation() {
                   <span className="text-xs font-bold text-slate-300">P{page}</span>
                   
                   {/* Indicators for Reads/Writes */}
-                  <div className="flex gap-1 mt-1">
+                  <div className="flex gap-0.5 mt-1 overflow-hidden justify-center w-full px-0.5">
                     {readers.map(r => (
                       <div key={`r-${r.id}`} className={`w-1.5 h-1.5 rounded-full ${getColorClass(r.color, "bg")} ring-1 ring-black`} title={`${r.id} read`} />
                     ))}

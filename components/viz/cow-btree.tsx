@@ -275,12 +275,13 @@ export default function CowBtree() {
                   </motion.div>
                 );
               })}
-                          </AnimatePresence>
-                        </div>
-                      </div>
-                    </div>
-            
-                    {/* Info Panel */}        <div className="w-full md:w-64 border-t md:border-t-0 md:border-l border-white/10 bg-black/40 p-4 flex flex-col justify-between">
+            </AnimatePresence>
+            </div>
+          </div>
+        </div>
+
+        {/* Info Panel */}
+        <div className="w-full md:w-64 border-t md:border-t-0 md:border-l border-white/10 bg-black/40 p-4 flex flex-col justify-between">
           <div className="space-y-4">
             <div className="text-[9px] font-black uppercase tracking-[0.2em] text-teal-500 flex items-center gap-2">
               <GitBranch className="h-3 w-3" />
