@@ -1,0 +1,1510 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  X,
+  Search,
+  Play,
+  Pause,
+  ChevronLeft,
+  ChevronRight,
+  Maximize2,
+  Minimize2,
+  Info,
+  Menu,
+  ArrowLeft,
+} from "lucide-react";
+import Link from "next/link";
+import dayjs from "dayjs";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useStore } from "@tanstack/react-store";
+import { Store } from "@tanstack/store";
+import {
+  type ColumnDef,
+  type SortingState,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { cn } from "@/lib/utils";
+import { BUCKETS, DB_FILENAME } from "./constants";
+import { applySynapticPatch, stripMd } from "./patch-engine";
+import type { Commit, Tab, DiffMode, MetricsEntry } from "./types";
+import "./viewer.css";
+
+// ---------------------------------------------------------------------------
+// Database & Caches (module-level, outside React lifecycle)
+// ---------------------------------------------------------------------------
+
+type SqlJsDatabase = {
+  exec: (sql: string, params?: unknown[]) => { values: unknown[][] }[];
+  close: () => void;
+};
+
+type ViewerBootstrap = {
+  db: SqlJsDatabase;
+  baseDoc: string;
+  commits: Commit[];
+  groups: Map<string, number[]>;
+  startIdx: number;
+};
+
+type CommitSortMode = "latest" | "oldest" | "impact" | "author";
+
+type ViewerState = {
+  currentIdx: number;
+  tab: Tab;
+  query: string;
+  activeBuckets: Set<number>;
+  playing: boolean;
+  diffMode: DiffMode;
+  focusMode: boolean;
+  sidebarOpen: boolean;
+  legendOpen: boolean;
+  specHtml: string;
+  diffHtml: string;
+  metrics: MetricsEntry[];
+  specLineCount: number;
+  sortMode: CommitSortMode;
+};
+
+const EMPTY_COMMITS: Commit[] = [];
+const EMPTY_GROUPS = new Map<string, number[]>();
+const COMMIT_COLUMNS: ColumnDef<Commit>[] = [
+  { accessorKey: "idx" },
+  { accessorKey: "date" },
+  { accessorKey: "impact" },
+  { accessorKey: "author" },
+  { accessorKey: "subject" },
+  { accessorKey: "hash" },
+  { accessorKey: "short" },
+];
+
+const QUERY_KEYS = {
+  bootstrap: ["spec-evolution", "bootstrap"] as const,
+  metrics: ["spec-evolution", "metrics"] as const,
+  snapshot: (idx: number) => ["spec-evolution", "snapshot", idx] as const,
+  patch: (idx: number) => ["spec-evolution", "patch", idx] as const,
+};
+
+let dbInstance: SqlJsDatabase | null = null;
+const docCache = new Map<number, string>();
+const patchCache = new Map<number, string>();
+
+async function loadDatabase(): Promise<SqlJsDatabase> {
+  if (dbInstance) return dbInstance;
+
+  const initSqlJs = (await import("sql.js")).default;
+  const SQL = await initSqlJs({
+    locateFile: (file: string) =>
+      `https://cdn.jsdelivr.net/npm/sql.js@1.14.0/dist/${file}`,
+  });
+
+  const resp = await fetch(`/${DB_FILENAME}`);
+  if (!resp.ok) throw new Error(`Failed to fetch database: ${resp.status}`);
+  const buf = await resp.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+
+  const magic = new TextDecoder().decode(bytes.slice(0, 15));
+  if (magic !== "SQLite format 3") {
+    throw new Error(`Not a SQLite database (magic: "${magic}")`);
+  }
+
+  dbInstance = new SQL.Database(bytes) as unknown as SqlJsDatabase;
+  return dbInstance;
+}
+
+function loadCommitsFromDb(db: SqlJsDatabase): Commit[] {
+  const res = db.exec(
+    "SELECT idx, hash, short, date_iso, author, subject, add_lines, del_lines, impact, primary_bucket, labels_json FROM commits ORDER BY idx ASC"
+  );
+  if (!res.length) return [];
+  return res[0].values.map((r) => ({
+    idx: r[0] as number,
+    hash: r[1] as string,
+    short: r[2] as string,
+    date: r[3] as string,
+    author: r[4] as string,
+    subject: r[5] as string,
+    add: r[6] as number,
+    del: r[7] as number,
+    impact: r[8] as number,
+    primary: r[9] as number,
+    labels: parseJsonNumberArray(r[10]),
+  }));
+}
+
+function loadGroupsFromDb(
+  db: SqlJsDatabase
+): Map<string, number[]> {
+  const groups = new Map<string, number[]>();
+  const res = db.exec("SELECT commit_hash, labels_json FROM change_groups");
+  if (!res.length) return groups;
+  for (const r of res[0].values) {
+    const hash = r[0] as string;
+    const labels = parseJsonNumberArray(r[1]);
+    if (!groups.has(hash)) groups.set(hash, []);
+    groups.get(hash)!.push(...labels);
+  }
+  return groups;
+}
+
+function getInitialCommitIndex(totalCommits: number): number {
+  if (totalCommits <= 0) return 0;
+
+  let startIdx = totalCommits - 1;
+  if (typeof window === "undefined") return startIdx;
+
+  const hash = window.location.hash;
+  if (hash.startsWith("#entry-")) {
+    const requested = parseInt(hash.replace("#entry-", ""), 10);
+    if (!isNaN(requested) && requested >= 0 && requested < totalCommits) {
+      startIdx = requested;
+    }
+  }
+
+  return startIdx;
+}
+
+function createInitialViewerState(): ViewerState {
+  return {
+    currentIdx: 0,
+    tab: "spec",
+    query: "",
+    activeBuckets: new Set<number>(),
+    playing: false,
+    diffMode: "line-by-line",
+    focusMode: false,
+    sidebarOpen: false,
+    legendOpen: false,
+    specHtml: "",
+    diffHtml: "",
+    metrics: [],
+    specLineCount: 0,
+    sortMode: "latest",
+  };
+}
+
+function parseJsonNumberArray(value: unknown): number[] {
+  if (typeof value !== "string") return [];
+
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is number => typeof entry === "number");
+  } catch {
+    return [];
+  }
+}
+
+function sortingForMode(mode: CommitSortMode): SortingState {
+  switch (mode) {
+    case "oldest":
+      return [{ id: "idx", desc: false }];
+    case "impact":
+      return [
+        { id: "impact", desc: true },
+        { id: "idx", desc: true },
+      ];
+    case "author":
+      return [
+        { id: "author", desc: false },
+        { id: "idx", desc: true },
+      ];
+    case "latest":
+    default:
+      return [{ id: "idx", desc: true }];
+  }
+}
+
+function bucketById(id: number) {
+  return BUCKETS.find((b) => b.id === id) || BUCKETS[9];
+}
+
+async function loadViewerBootstrap(): Promise<ViewerBootstrap> {
+  const db = await loadDatabase();
+
+  const baseRes = db.exec("SELECT text FROM base_doc LIMIT 1");
+  const baseDoc = baseRes.length ? (baseRes[0].values[0][0] as string) : "";
+
+  const commits = loadCommitsFromDb(db);
+  const groups = loadGroupsFromDb(db);
+  const startIdx = getInitialCommitIndex(commits.length);
+
+  return {
+    db,
+    baseDoc,
+    commits,
+    groups,
+    startIdx,
+  };
+}
+
+async function getPatch(db: SqlJsDatabase, idx: number): Promise<string> {
+  if (patchCache.has(idx)) return patchCache.get(idx)!;
+  const res = db.exec("SELECT patch FROM patches WHERE idx = ?", [idx]);
+  const p = res.length ? (res[0].values[0][0] as string) : "";
+  patchCache.set(idx, p);
+  return p;
+}
+
+async function reconstructSnapshot(
+  db: SqlJsDatabase,
+  idx: number,
+  baseDoc: string
+): Promise<string> {
+  if (docCache.has(idx)) return docCache.get(idx)!;
+
+  let startIdx = 0;
+  let lines = baseDoc.split("\n");
+  for (let i = Math.floor(idx / 10) * 10; i >= 0; i -= 10) {
+    if (docCache.has(i)) {
+      startIdx = i + 1;
+      lines = docCache.get(i)!.split("\n");
+      break;
+    }
+  }
+
+  for (let i = startIdx; i <= idx; i++) {
+    const p = await getPatch(db, i);
+    if (p) lines = applySynapticPatch(lines, p);
+    if (i % 10 === 0 && !docCache.has(i)) docCache.set(i, lines.join("\n"));
+  }
+
+  const result = lines.join("\n");
+  docCache.set(idx, result);
+  return result;
+}
+
+async function computeAllMetrics(
+  db: SqlJsDatabase,
+  commits: Commit[],
+  baseDoc: string
+): Promise<MetricsEntry[]> {
+  const metrics: MetricsEntry[] = [];
+  let lines = baseDoc.split("\n");
+  for (let i = 0; i < commits.length; i++) {
+    const p = await getPatch(db, i);
+    if (p) lines = applySynapticPatch(lines, p);
+    const text = lines.join("\n");
+    const tokens = text.split(/\s+/).length;
+    metrics.push({ lines: lines.length, tokens, lev: commits[i].impact || 0 });
+    if (i % 10 === 0) docCache.set(i, text);
+  }
+  return metrics;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function escapeHtml(text: string): string {
+  return text
+    ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    : "";
+}
+
+function enhanceTables(root: HTMLElement) {
+  root.querySelectorAll("table").forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("th")).map((th) =>
+      th.textContent?.trim() ?? ""
+    );
+    table.querySelectorAll("tr").forEach((tr) => {
+      tr.querySelectorAll("td").forEach((td, i) => {
+        if (headers[i]) td.setAttribute("data-label", headers[i]);
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Viewer Component
+// ---------------------------------------------------------------------------
+
+export default function SpecEvolutionViewer() {
+  const viewerStoreRef = useRef<Store<ViewerState> | null>(null);
+  if (!viewerStoreRef.current) {
+    viewerStoreRef.current = new Store(createInitialViewerState());
+  }
+  const viewerStore = viewerStoreRef.current;
+
+  const currentIdx = useStore(viewerStore, (s) => s.currentIdx);
+  const tab = useStore(viewerStore, (s) => s.tab);
+  const query = useStore(viewerStore, (s) => s.query);
+  const activeBuckets = useStore(viewerStore, (s) => s.activeBuckets);
+  const playing = useStore(viewerStore, (s) => s.playing);
+  const diffMode = useStore(viewerStore, (s) => s.diffMode);
+  const focusMode = useStore(viewerStore, (s) => s.focusMode);
+  const sidebarOpen = useStore(viewerStore, (s) => s.sidebarOpen);
+  const legendOpen = useStore(viewerStore, (s) => s.legendOpen);
+  const specHtml = useStore(viewerStore, (s) => s.specHtml);
+  const diffHtml = useStore(viewerStore, (s) => s.diffHtml);
+  const metrics = useStore(viewerStore, (s) => s.metrics);
+  const specLineCount = useStore(viewerStore, (s) => s.specLineCount);
+  const sortMode = useStore(viewerStore, (s) => s.sortMode);
+
+  // Refs
+  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const commitListRef = useRef<HTMLDivElement>(null);
+  const chartVelocityRef = useRef<HTMLDivElement>(null);
+  const chartDistRef = useRef<HTMLDivElement>(null);
+  const chartMassRef = useRef<HTMLDivElement>(null);
+  const specContentRef = useRef<HTMLDivElement>(null);
+  const initSelectionRef = useRef(false);
+  const echartsRef = useRef<{
+    velocity: unknown;
+    dist: unknown;
+    mass: unknown;
+  }>({ velocity: null, dist: null, mass: null });
+  const renderNonceRef = useRef(0);
+
+  const queryClient = useQueryClient();
+
+  const bootstrapQuery = useQuery({
+    queryKey: QUERY_KEYS.bootstrap,
+    queryFn: loadViewerBootstrap,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  const commits = bootstrapQuery.data?.commits ?? EMPTY_COMMITS;
+  const groups = bootstrapQuery.data?.groups ?? EMPTY_GROUPS;
+  const db = bootstrapQuery.data?.db ?? null;
+  const baseDoc = bootstrapQuery.data?.baseDoc ?? "";
+
+  useEffect(() => {
+    if (!bootstrapQuery.data || initSelectionRef.current) return;
+    initSelectionRef.current = true;
+    viewerStore.setState((state) => ({
+      ...state,
+      currentIdx: bootstrapQuery.data.startIdx,
+    }));
+  }, [bootstrapQuery.data, viewerStore]);
+
+  useEffect(() => {
+    if (commits.length === 0) return;
+    if (currentIdx < commits.length) return;
+
+    const fallbackIdx = commits.length - 1;
+    viewerStore.setState((state) => ({
+      ...state,
+      currentIdx: fallbackIdx,
+    }));
+    history.replaceState(null, "", `#entry-${fallbackIdx}`);
+  }, [commits.length, currentIdx, viewerStore]);
+
+  const metricsQuery = useQuery({
+    queryKey: QUERY_KEYS.metrics,
+    queryFn: () => computeAllMetrics(db!, commits, baseDoc),
+    enabled: Boolean(db && commits.length > 0),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  useEffect(() => {
+    if (!metricsQuery.data) return;
+    viewerStore.setState((state) => ({
+      ...state,
+      metrics: metricsQuery.data,
+    }));
+  }, [metricsQuery.data, viewerStore]);
+
+  const snapshotQuery = useQuery({
+    queryKey: QUERY_KEYS.snapshot(currentIdx),
+    queryFn: () => reconstructSnapshot(db!, currentIdx, baseDoc),
+    enabled: Boolean(db && commits.length > 0),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  const patchQuery = useQuery({
+    queryKey: QUERY_KEYS.patch(currentIdx),
+    queryFn: () => getPatch(db!, currentIdx),
+    enabled: Boolean(db && commits.length > 0),
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  useEffect(() => {
+    if (!db || commits.length === 0) return;
+
+    const neighbors = [currentIdx - 1, currentIdx + 1].filter(
+      (idx) => idx >= 0 && idx < commits.length
+    );
+
+    neighbors.forEach((idx) => {
+      queryClient.prefetchQuery({
+        queryKey: QUERY_KEYS.patch(idx),
+        queryFn: () => getPatch(db, idx),
+        staleTime: Infinity,
+        gcTime: Infinity,
+      });
+
+      queryClient.prefetchQuery({
+        queryKey: QUERY_KEYS.snapshot(idx),
+        queryFn: () => reconstructSnapshot(db, idx, baseDoc),
+        staleTime: Infinity,
+        gcTime: Infinity,
+      });
+    });
+  }, [queryClient, db, baseDoc, commits.length, currentIdx]);
+
+  // ── TanStack Table: bucket filtering + search + sorting ──────────────
+  const bucketFilteredCommits = useMemo(() => {
+    if (activeBuckets.size === 0) return commits;
+    return commits.filter((c) => activeBuckets.has(c.primary));
+  }, [commits, activeBuckets]);
+
+  const tableSorting = useMemo(() => sortingForMode(sortMode), [sortMode]);
+
+  const commitTable = useReactTable({
+    data: bucketFilteredCommits,
+    columns: COMMIT_COLUMNS,
+    state: {
+      sorting: tableSorting,
+      globalFilter: query,
+    },
+    globalFilterFn: (row, _columnId, filterValue) => {
+      const q = String(filterValue ?? "").trim().toLowerCase();
+      if (!q) return true;
+
+      const commit = row.original;
+      return (
+        commit.subject.toLowerCase().includes(q) ||
+        commit.hash.toLowerCase().includes(q) ||
+        commit.short.toLowerCase().includes(q) ||
+        commit.author.toLowerCase().includes(q)
+      );
+    },
+    getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  });
+
+  const filteredRows = commitTable.getRowModel().rows;
+  const filtered = useMemo(
+    () => filteredRows.map((row) => row.original),
+    [filteredRows]
+  );
+
+  const currentCommit = commits[currentIdx] ?? null;
+
+  // ── TanStack Virtual: sidebar list ────────────────────────────────────
+  const commitVirtualizer = useVirtualizer({
+    count: filtered.length,
+    getScrollElement: () => commitListRef.current,
+    estimateSize: () => 96,
+    overscan: 10,
+  });
+
+  const selectedFilteredIdx = useMemo(
+    () => filtered.findIndex((c) => c.idx === currentIdx),
+    [filtered, currentIdx]
+  );
+
+  useEffect(() => {
+    if (selectedFilteredIdx < 0) return;
+    commitVirtualizer.scrollToIndex(selectedFilteredIdx, {
+      align: "center",
+      behavior: "smooth",
+    });
+  }, [selectedFilteredIdx, commitVirtualizer]);
+
+  // ── Render spec content when currentIdx or tab changes ──────────────
+  useEffect(() => {
+    if (tab !== "spec") return;
+    if (typeof snapshotQuery.data !== "string") return;
+
+    const text = snapshotQuery.data;
+    const nonce = ++renderNonceRef.current;
+
+    viewerStore.setState((state) => ({
+      ...state,
+      specLineCount: text.split("\n").length,
+    }));
+
+    async function render() {
+      try {
+        const { marked } = await import("marked");
+        const DOMPurify = (await import("dompurify")).default;
+        if (nonce !== renderNonceRef.current) return;
+
+        const html = DOMPurify.sanitize(await marked.parse(text));
+        viewerStore.setState((state) => ({
+          ...state,
+          specHtml: html,
+        }));
+      } catch {
+        viewerStore.setState((state) => ({
+          ...state,
+          specHtml: `<pre class=\"spec-fallback-pre\">${escapeHtml(text)}</pre>`,
+        }));
+      }
+    }
+
+    render();
+  }, [tab, snapshotQuery.data, viewerStore]);
+
+  // Post-process spec HTML (enhance tables, highlight diffs)
+  useEffect(() => {
+    if (tab !== "spec" || !specContentRef.current || !specHtml) return;
+    enhanceTables(specContentRef.current);
+
+    // Highlight diff context
+    const patch = patchQuery.data;
+    if (!patch || !specContentRef.current) return;
+
+    const addedLines = new Set<string>();
+    patch.split("\n").forEach((line) => {
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        const content = stripMd(line.slice(1));
+        if (content.length > 6) addedLines.add(content);
+      }
+    });
+    if (addedLines.size === 0) return;
+
+    const walker = document.createTreeWalker(
+      specContentRef.current,
+      NodeFilter.SHOW_TEXT,
+      null
+    );
+    const nodesToReplace: Text[] = [];
+    let node: Text | null;
+    while ((node = walker.nextNode() as Text | null)) {
+      const txt = stripMd(node.textContent || "");
+      if (txt.length > 6 && addedLines.has(txt)) {
+        nodesToReplace.push(node);
+      }
+    }
+    nodesToReplace.forEach((n) => {
+      if (
+        n.parentNode &&
+        !(n.parentNode as HTMLElement).classList?.contains("diff-highlight")
+      ) {
+        const span = document.createElement("span");
+        span.className = "diff-highlight";
+        span.textContent = n.textContent;
+        n.parentNode.replaceChild(span, n);
+      }
+    });
+  }, [tab, specHtml, patchQuery.data]);
+
+  // ── Render diff when currentIdx or tab changes ──────────────────────
+  useEffect(() => {
+    if (tab !== "diff") return;
+    if (typeof patchQuery.data !== "string") return;
+
+    const patch = patchQuery.data;
+    const nonce = ++renderNonceRef.current;
+
+    async function render() {
+      if (!patch) {
+        viewerStore.setState((state) => ({
+          ...state,
+          diffHtml: '<div class="no-delta">NO DELTA</div>',
+        }));
+        return;
+      }
+
+      try {
+        const diff2html = await import("diff2html");
+        const { ColorSchemeType } = await import("diff2html/lib/types");
+        const DOMPurify = (await import("dompurify")).default;
+        if (nonce !== renderNonceRef.current) return;
+
+        const rendered = diff2html.html(patch, {
+          drawFileList: false,
+          matching: "lines",
+          outputFormat: diffMode,
+          colorScheme: ColorSchemeType.DARK,
+        });
+
+        viewerStore.setState((state) => ({
+          ...state,
+          diffHtml: DOMPurify.sanitize(rendered),
+        }));
+      } catch {
+        viewerStore.setState((state) => ({
+          ...state,
+          diffHtml: `<pre class=\"spec-fallback-pre\">${escapeHtml(patch)}</pre>`,
+        }));
+      }
+    }
+
+    render();
+  }, [tab, patchQuery.data, diffMode, viewerStore]);
+
+  // ── Render charts ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (tab !== "timeline" || metrics.length === 0 || commits.length === 0) return;
+
+    async function renderCharts() {
+      const echarts = await import("echarts");
+
+      const baseTheme = {
+        backgroundColor: "transparent",
+        textStyle: {
+          fontFamily: "JetBrains Mono, monospace",
+          color: "#71717a",
+        },
+        grid: { top: 30, bottom: 30, left: 40, right: 20 },
+      };
+
+      // Velocity chart
+      if (chartVelocityRef.current) {
+        if (!echartsRef.current.velocity) {
+          echartsRef.current.velocity = echarts.init(chartVelocityRef.current);
+        }
+        const chart = echartsRef.current.velocity as ReturnType<typeof echarts.init>;
+        chart.setOption({
+          ...baseTheme,
+          xAxis: {
+            type: "category" as const,
+            axisLine: { lineStyle: { color: "#27272a" } },
+            splitLine: { show: false },
+          },
+          yAxis: {
+            type: "value" as const,
+            axisLine: { lineStyle: { color: "#27272a" } },
+            splitLine: { lineStyle: { color: "#27272a" } },
+          },
+          series: [
+            {
+              data: commits.map((c) => [c.date, c.impact]),
+              type: "line",
+              smooth: true,
+              lineStyle: { color: "#14b8a6", width: 2 },
+              markLine: {
+                symbol: ["none", "none"],
+                label: { show: false },
+                data: [{ xAxis: commits[currentIdx]?.date }],
+                lineStyle: {
+                  color: "rgba(255, 255, 255, 0.4)",
+                  type: "dashed" as const,
+                },
+              },
+              areaStyle: {
+                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                  { offset: 0, color: "rgba(20, 184, 166, 0.2)" },
+                  { offset: 1, color: "rgba(20, 184, 166, 0)" },
+                ]),
+              },
+            },
+          ],
+        });
+      }
+
+      // Distribution chart
+      if (chartDistRef.current) {
+        if (!echartsRef.current.dist) {
+          echartsRef.current.dist = echarts.init(chartDistRef.current);
+        }
+        const chart = echartsRef.current.dist as ReturnType<typeof echarts.init>;
+        const counts: Record<number, number> = {};
+        commits.forEach((c) => {
+          counts[c.primary] = (counts[c.primary] || 0) + 1;
+        });
+        chart.setOption({
+          ...baseTheme,
+          series: [
+            {
+              type: "pie",
+              radius: ["50%", "80%"],
+              itemStyle: {
+                borderRadius: 5,
+                borderColor: "#020a05",
+                borderWidth: 2,
+              },
+              label: { show: false },
+              data: BUCKETS.map((b) => ({
+                value: counts[b.id] || 0,
+                name: b.name,
+                itemStyle: { color: b.color },
+              })),
+            },
+          ],
+        });
+      }
+
+      // Mass growth chart
+      if (chartMassRef.current) {
+        if (!echartsRef.current.mass) {
+          echartsRef.current.mass = echarts.init(chartMassRef.current);
+        }
+        const chart = echartsRef.current.mass as ReturnType<typeof echarts.init>;
+        const buckets: Record<string, Record<number, number>> = {};
+        commits.forEach((c) => {
+          const d = dayjs(c.date);
+          const k = d.format("YYYY-MM-DD");
+          if (!buckets[k]) buckets[k] = {};
+          buckets[k][c.primary] = (buckets[k][c.primary] || 0) + c.impact;
+        });
+        const labels = Object.keys(buckets).sort();
+        const series = BUCKETS.map((b) => ({
+          name: b.name,
+          type: "bar" as const,
+          stack: "total",
+          itemStyle: { color: b.color },
+          data: labels.map((l) => buckets[l][b.id] || 0),
+        }));
+        chart.setOption(
+          {
+            ...baseTheme,
+            tooltip: { trigger: "axis" },
+            xAxis: {
+              type: "category" as const,
+              data: labels,
+              axisLine: { lineStyle: { color: "#27272a" } },
+            },
+            yAxis: {
+              type: "value" as const,
+              axisLine: { lineStyle: { color: "#27272a" } },
+              splitLine: { lineStyle: { color: "#27272a" } },
+            },
+            series,
+          },
+          true
+        );
+      }
+    }
+
+    renderCharts();
+  }, [tab, metrics, commits, currentIdx]);
+
+  // Resize charts on window resize
+  useEffect(() => {
+    function handleResize() {
+      const refs = echartsRef.current;
+      if (refs.velocity) (refs.velocity as { resize: () => void }).resize();
+      if (refs.dist) (refs.dist as { resize: () => void }).resize();
+      if (refs.mass) (refs.mass as { resize: () => void }).resize();
+    }
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      // Dispose ECharts instances on unmount to free canvas/bindng memory
+      const refs = echartsRef.current;
+      if (refs.velocity) (refs.velocity as { dispose: () => void }).dispose();
+      if (refs.dist) (refs.dist as { dispose: () => void }).dispose();
+      if (refs.mass) (refs.mass as { dispose: () => void }).dispose();
+      echartsRef.current = { velocity: null, dist: null, mass: null };
+    };
+  }, []);
+
+  // ── Draw evolution map canvas ───────────────────────────────────────
+  const drawEvolutionMap = useCallback(() => {
+    const cvs = canvasRef.current;
+    if (!cvs || commits.length === 0) return;
+    const ctx = cvs.getContext("2d");
+    if (!ctx) return;
+
+    cvs.width = cvs.clientWidth * (window.devicePixelRatio || 1);
+    cvs.height = cvs.clientHeight * (window.devicePixelRatio || 1);
+    ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+    const cw = cvs.clientWidth;
+    const ch = cvs.clientHeight;
+
+    if (!cw || !ch) return;
+    ctx.clearRect(0, 0, cw, ch);
+
+    const barW = cw / commits.length;
+    commits.forEach((c, i) => {
+      const labels = groups.get(c.hash) || c.labels;
+      const bucketIds = labels.length ? labels : [10];
+      const counts: Record<number, number> = {};
+      bucketIds.forEach((l) => {
+        counts[l] = (counts[l] || 0) + 1;
+      });
+      const total = bucketIds.length;
+      let cy = 0;
+      Object.keys(counts).forEach((l) => {
+        const b = BUCKETS.find((x) => x.id === Number(l)) || BUCKETS[9];
+        const sh = (counts[Number(l)] / total) * ch;
+        ctx.fillStyle = b.color;
+        ctx.fillRect(i * barW, cy, Math.max(1, barW), sh);
+        cy += sh;
+      });
+    });
+
+    // Draw current position indicator
+    const indicatorX = (currentIdx / commits.length) * cw;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+    ctx.fillRect(indicatorX - 1, 0, 2, ch);
+  }, [commits, groups, currentIdx]);
+
+  useEffect(() => {
+    drawEvolutionMap();
+  }, [drawEvolutionMap]);
+
+  useEffect(() => {
+    window.addEventListener("resize", drawEvolutionMap);
+    return () => window.removeEventListener("resize", drawEvolutionMap);
+  }, [drawEvolutionMap]);
+
+  // ── Navigation ──────────────────────────────────────────────────────
+
+  const selectCommit = useCallback(
+    (idx: number) => {
+      const target = Math.max(0, Math.min(commits.length - 1, idx));
+      viewerStore.setState((state) => ({
+        ...state,
+        currentIdx: target,
+      }));
+      history.replaceState(null, "", `#entry-${target}`);
+    },
+    [commits.length, viewerStore]
+  );
+
+  const goPrev = useCallback(() => {
+    const currentFilterIdx = filtered.findIndex((c) => c.idx === currentIdx);
+    if (currentFilterIdx > 0) {
+      selectCommit(filtered[currentFilterIdx - 1].idx);
+    } else if (currentFilterIdx === -1 && filtered.length > 0) {
+      selectCommit(filtered[0].idx);
+    }
+  }, [filtered, currentIdx, selectCommit]);
+
+  const goNext = useCallback(() => {
+    const currentFilterIdx = filtered.findIndex((c) => c.idx === currentIdx);
+    if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
+      selectCommit(filtered[currentFilterIdx + 1].idx);
+    } else if (currentFilterIdx === -1 && filtered.length > 0) {
+      selectCommit(filtered[0].idx);
+    }
+  }, [filtered, currentIdx, selectCommit]);
+
+  // ── Playback ────────────────────────────────────────────────────────
+
+  const togglePlay = useCallback(() => {
+    viewerStore.setState((state) => ({
+      ...state,
+      playing: !state.playing,
+    }));
+  }, [viewerStore]);
+
+  useEffect(() => {
+    if (!playing) {
+      if (playIntervalRef.current) {
+        clearInterval(playIntervalRef.current);
+        playIntervalRef.current = null;
+      }
+      return;
+    }
+
+    if (filtered.length === 0) {
+      viewerStore.setState((state) => ({
+        ...state,
+        playing: false,
+      }));
+      return;
+    }
+
+    playIntervalRef.current = setInterval(() => {
+      viewerStore.setState((state) => {
+        const currentFilterIdx = filtered.findIndex((c) => c.idx === state.currentIdx);
+
+        if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
+          const target = filtered[currentFilterIdx + 1].idx;
+          history.replaceState(null, "", `#entry-${target}`);
+          return {
+            ...state,
+            currentIdx: target,
+          };
+        }
+
+        if (currentFilterIdx === -1 && filtered.length > 0) {
+          const target = filtered[0].idx;
+          history.replaceState(null, "", `#entry-${target}`);
+          return {
+            ...state,
+            currentIdx: target,
+          };
+        }
+
+        return {
+          ...state,
+          playing: false,
+        };
+      });
+    }, 1500);
+
+    return () => {
+      if (playIntervalRef.current) {
+        clearInterval(playIntervalRef.current);
+        playIntervalRef.current = null;
+      }
+    };
+  }, [playing, filtered, viewerStore]);
+
+  // ── Keyboard shortcuts ──────────────────────────────────────────────
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.target as HTMLElement).tagName === "INPUT") return;
+
+      switch (e.code) {
+        case "Space":
+          e.preventDefault();
+          togglePlay();
+          break;
+        case "ArrowLeft":
+          goPrev();
+          break;
+        case "ArrowRight":
+          goNext();
+          break;
+        case "KeyF":
+          viewerStore.setState((state) => ({
+            ...state,
+            focusMode: !state.focusMode,
+          }));
+          break;
+        case "KeyL":
+          viewerStore.setState((state) => ({
+            ...state,
+            legendOpen: !state.legendOpen,
+          }));
+          break;
+        case "Slash":
+          e.preventDefault();
+          document.querySelector<HTMLInputElement>(".spec-sidebar-search")?.focus();
+          break;
+        case "Escape":
+          viewerStore.setState((state) => ({
+            ...state,
+            legendOpen: false,
+            focusMode: false,
+          }));
+          break;
+        default:
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [togglePlay, goPrev, goNext, viewerStore]);
+
+  // ── Bucket filter toggle ────────────────────────────────────────────
+
+  const toggleBucket = useCallback(
+    (id: number) => {
+      viewerStore.setState((state) => {
+        const next = new Set(state.activeBuckets);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+
+        return {
+          ...state,
+          activeBuckets: next,
+        };
+      });
+    },
+    [viewerStore]
+  );
+
+  // ── Canvas click handler ────────────────────────────────────────────
+
+  const handleMapClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const idx = Math.floor((x / rect.width) * commits.length);
+      if (idx >= 0 && idx < commits.length) selectCommit(idx);
+    },
+    [commits.length, selectCommit]
+  );
+
+  // ── Render ──────────────────────────────────────────────────────────
+
+  if (bootstrapQuery.isPending) {
+    return (
+      <div className="spec-viewer">
+        <div className="spec-loading">
+          <div className="spec-loading-spinner" />
+          <div className="spec-loading-text">Reanimating Neural Pathways...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (bootstrapQuery.isError) {
+    const errText =
+      bootstrapQuery.error instanceof Error
+        ? bootstrapQuery.error.message
+        : String(bootstrapQuery.error);
+
+    return (
+      <div className="spec-viewer">
+        <div className="spec-loading">
+          <div className="text-red-500 font-mono text-xs uppercase tracking-widest">
+            INIT_FAILURE: {errText}
+          </div>
+          <Link
+            href="/"
+            className="mt-6 btn-spec"
+          >
+            Return Home
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className={cn("spec-viewer", focusMode && "focus-mode")}>
+        {/* ── Header ──────────────────────────────────────────────── */}
+        <header className="spec-viewer-header">
+          <div className="spec-viewer-brand">
+            <Link
+              href="/"
+              className="btn-spec flex items-center gap-2"
+              title="Back to FrankenSQLite"
+            >
+              <ArrowLeft className="w-3 h-3" />
+              <span className="hidden sm:inline">HOME</span>
+            </Link>
+            <span className="spec-viewer-brand-text hidden sm:inline">
+              Spec Evolution Lab
+            </span>
+          </div>
+
+          <div className="spec-viewer-kpi-row">
+            <div className="spec-viewer-kpi">
+              <span className="spec-viewer-kpi-label">Commits</span>
+              <span className="spec-viewer-kpi-value">{commits.length}</span>
+            </div>
+            <div className="spec-viewer-kpi">
+              <span className="spec-viewer-kpi-label">Lines</span>
+              <span className="spec-viewer-kpi-value">
+                {specLineCount.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          <div className="spec-viewer-header-actions">
+            <button
+              onClick={() =>
+                viewerStore.setState((state) => ({
+                  ...state,
+                  legendOpen: true,
+                }))
+              }
+              className="btn-spec"
+              title="Category Legend"
+            >
+              <Info className="w-3 h-3 inline mr-1" />
+              LEGEND
+            </button>
+            <button
+              onClick={() =>
+                viewerStore.setState((state) => ({
+                  ...state,
+                  sidebarOpen: true,
+                }))
+              }
+              className="btn-spec md:hidden"
+              aria-label="Open commit sidebar"
+              aria-expanded={sidebarOpen}
+            >
+              <Menu className="w-3 h-3" />
+            </button>
+          </div>
+        </header>
+
+        {/* ── Body ────────────────────────────────────────────────── */}
+        <div className="spec-viewer-body">
+          {/* Sidebar */}
+          {sidebarOpen && (
+            <div
+              className="spec-sidebar-backdrop md:hidden"
+              onClick={() =>
+                viewerStore.setState((state) => ({
+                  ...state,
+                  sidebarOpen: false,
+                }))
+              }
+            />
+          )}
+          <aside
+            className={cn(
+              "spec-sidebar",
+              sidebarOpen && "mobile-active"
+            )}
+          >
+            <div className="spec-sidebar-header">
+              <div className="flex items-center gap-2">
+                <Search className="w-3 h-3 text-slate-500 flex-shrink-0" />
+                <input
+                  type="text"
+                  className="spec-sidebar-search"
+                  placeholder="Search commits..."
+                  value={query}
+                  onChange={(e) =>
+                    viewerStore.setState((state) => ({
+                      ...state,
+                      query: e.target.value,
+                    }))
+                  }
+                />
+                <button
+                  onClick={() =>
+                    viewerStore.setState((state) => ({
+                      ...state,
+                      sidebarOpen: false,
+                    }))
+                  }
+                  className="md:hidden p-1 text-slate-500"
+                  aria-label="Close sidebar"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="spec-sidebar-sort-row">
+                <span className="spec-sidebar-sort-label">Sort</span>
+                <select
+                  className="spec-sidebar-sort"
+                  value={sortMode}
+                  onChange={(e) =>
+                    viewerStore.setState((state) => ({
+                      ...state,
+                      sortMode: e.target.value as CommitSortMode,
+                    }))
+                  }
+                  aria-label="Sort commits"
+                >
+                  <option value="latest">Latest First</option>
+                  <option value="oldest">Oldest First</option>
+                  <option value="impact">Highest Impact</option>
+                  <option value="author">Author (A-Z)</option>
+                </select>
+              </div>
+
+              <div className="spec-sidebar-filters">
+                {BUCKETS.map((b) => (
+                  <span
+                    key={b.id}
+                    className={cn(
+                      "filter-pill",
+                      activeBuckets.has(b.id) && "active"
+                    )}
+                    style={{ "--pill-color": b.color, color: `${b.color}cc` } as React.CSSProperties}
+                    title={b.desc}
+                    onClick={() => toggleBucket(b.id)}
+                  >
+                    {b.name}
+                  </span>
+                ))}
+              </div>
+
+              <div className="spec-sidebar-summary">
+                {filtered.length} shown / {commits.length} total
+              </div>
+            </div>
+
+            <div className="spec-sidebar-list" ref={commitListRef}>
+              {filtered.length === 0 ? (
+                <div className="spec-sidebar-empty">No commits match current filters.</div>
+              ) : (
+                <div
+                  className="spec-sidebar-list-inner"
+                  style={{ height: `${commitVirtualizer.getTotalSize()}px` }}
+                >
+                  {commitVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const c = filtered[virtualRow.index];
+                    if (!c) return null;
+
+                    const bucket = bucketById(c.primary);
+                    const isSelected = c.idx === currentIdx;
+
+                    return (
+                      <div
+                        key={c.idx}
+                        ref={commitVirtualizer.measureElement}
+                        data-idx={c.idx}
+                        className="spec-sidebar-row"
+                        style={{
+                          transform: `translateY(${virtualRow.start}px)`,
+                        }}
+                      >
+                        <div
+                          className={cn(
+                            "commit-card",
+                            isSelected && "selected",
+                            isSelected && playing && "playing"
+                          )}
+                          onClick={() => {
+                            selectCommit(c.idx);
+                            viewerStore.setState((state) => ({
+                              ...state,
+                              sidebarOpen: false,
+                            }));
+                          }}
+                        >
+                          <div className="commit-card-header">
+                            <span>#{c.idx}</span>
+                            <span>{dayjs(c.date).format("MMM DD")}</span>
+                          </div>
+                          <div className="commit-card-subject">
+                            {c.subject}
+                          </div>
+                          <div className="commit-card-meta">
+                            <span
+                              className="tag-pill"
+                              style={{
+                                color: bucket.color,
+                                border: `1px solid ${bucket.color}20`,
+                              }}
+                            >
+                              {bucket.name}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">
+                              +{c.add} / -{c.del}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </aside>
+
+          {/* Main Content Area */}
+          <main className="spec-main">
+            <div className="spec-main-toolbar">
+              <div className="spec-tabs">
+                {(
+                  [
+                    ["spec", "THE_LEDGER"],
+                    ["timeline", "DIAGNOSTICS"],
+                    ["diff", "DELTA"],
+                  ] as const
+                ).map(([t, label]) => (
+                  <button
+                    key={t}
+                    className={cn("spec-tab", tab === t && "active")}
+                    onClick={() =>
+                      viewerStore.setState((state) => ({
+                        ...state,
+                        tab: t,
+                      }))
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-3">
+                {tab === "diff" && (
+                  <button
+                    className="btn-spec"
+                    onClick={() =>
+                      viewerStore.setState((state) => ({
+                        ...state,
+                        diffMode:
+                          state.diffMode === "line-by-line"
+                            ? "side-by-side"
+                            : "line-by-line",
+                      }))
+                    }
+                  >
+                    MODE: {diffMode === "line-by-line" ? "LINE" : "SIDE"}
+                  </button>
+                )}
+                <span className="spec-active-label hidden sm:inline">
+                  {currentCommit
+                    ? `LOG_ENTRY_${currentIdx} // ${currentCommit.short}`
+                    : ""}
+                </span>
+              </div>
+            </div>
+
+            <div className="spec-viewport">
+              {/* Spec Tab */}
+              <div
+                className={cn(
+                  "spec-scroll-pane",
+                  tab !== "spec" && "hidden"
+                )}
+              >
+                <div
+                  ref={specContentRef}
+                  className="spec-content"
+                  dangerouslySetInnerHTML={{ __html: specHtml }}
+                />
+              </div>
+
+              {/* Timeline/Charts Tab */}
+              <div
+                className={cn(
+                  "spec-scroll-pane spec-charts-panel",
+                  tab !== "timeline" && "hidden"
+                )}
+              >
+                <div ref={chartVelocityRef} style={{ height: 250, marginBottom: 30 }} />
+                <div ref={chartDistRef} style={{ height: 250, marginBottom: 30 }} />
+                <div ref={chartMassRef} style={{ height: 350 }} />
+              </div>
+
+              {/* Diff Tab */}
+              <div
+                className={cn(
+                  "spec-scroll-pane spec-diff-content",
+                  tab !== "diff" && "hidden"
+                )}
+              >
+                <div dangerouslySetInnerHTML={{ __html: diffHtml }} />
+              </div>
+            </div>
+          </main>
+        </div>
+
+        {/* ── Dock ────────────────────────────────────────────────── */}
+        <div className="spec-dock">
+          <div className="spec-evolution-map">
+            <canvas
+              ref={canvasRef}
+              className="spec-map-canvas"
+              onClick={handleMapClick}
+            />
+          </div>
+          <div className="spec-dock-controls">
+            <div className="spec-dock-buttons">
+              <button className="btn-spec" onClick={goPrev}>
+                <ChevronLeft className="w-3 h-3 inline" /> PREV
+              </button>
+              <button
+                className={cn("btn-spec", playing && "active")}
+                onClick={togglePlay}
+              >
+                {playing ? (
+                  <>
+                    <Pause className="w-3 h-3 inline mr-1" />
+                    SUSPEND
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3 h-3 inline mr-1" />
+                    REANIMATE
+                  </>
+                )}
+              </button>
+              <button className="btn-spec" onClick={goNext}>
+                NEXT <ChevronRight className="w-3 h-3 inline" />
+              </button>
+              <button
+                className={cn("btn-spec", focusMode && "active")}
+                onClick={() =>
+                  viewerStore.setState((state) => ({
+                    ...state,
+                    focusMode: !state.focusMode,
+                  }))
+                }
+                aria-label={focusMode ? "Exit focus mode" : "Enter focus mode"}
+                aria-pressed={focusMode}
+              >
+                {focusMode ? (
+                  <Minimize2 className="w-3 h-3 inline" />
+                ) : (
+                  <Maximize2 className="w-3 h-3 inline" />
+                )}
+              </button>
+            </div>
+            <div className="spec-dock-info">
+              {currentCommit && (
+                <>
+                  <div className="spec-dock-subject">
+                    {currentCommit.subject}
+                  </div>
+                  <div className="spec-dock-details">
+                    {`HASH: ${currentCommit.short} // BY: ${currentCommit.author} // TIME: ${dayjs(currentCommit.date).format("MMM DD HH:mm")}`}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Focus mode exit button */}
+        {focusMode && (
+          <button
+            className="btn-spec fixed top-4 right-4 z-[200]"
+            onClick={() =>
+              viewerStore.setState((state) => ({
+                ...state,
+                focusMode: false,
+              }))
+            }
+          >
+            EXIT FOCUS
+          </button>
+        )}
+      </div>
+
+      {/* ── Legend Overlay ──────────────────────────────────────────── */}
+      <AnimatePresence>
+        {legendOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="legend-overlay active"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                viewerStore.setState((state) => ({
+                  ...state,
+                  legendOpen: false,
+                }));
+              }
+            }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="legend-card"
+            >
+              <h3 className="text-sm font-bold text-white border-b border-white/10 pb-3 mb-4">
+                Evolutionary Categories
+              </h3>
+              <div className="legend-grid">
+                {BUCKETS.map((b) => (
+                  <div key={b.id} className="legend-item">
+                    <div className="legend-item-header">
+                      <div
+                        className="legend-dot"
+                        style={{ background: b.color }}
+                      />
+                      <span className="legend-item-name">{b.name}</span>
+                    </div>
+                    <div className="legend-item-desc">{b.desc}</div>
+                  </div>
+                ))}
+              </div>
+              <button
+                className="btn-spec w-full mt-5 text-center"
+                onClick={() =>
+                  viewerStore.setState((state) => ({
+                    ...state,
+                    legendOpen: false,
+                  }))
+                }
+              >
+                CLOSE
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
+}
