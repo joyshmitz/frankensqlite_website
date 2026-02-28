@@ -5,6 +5,7 @@ export interface Commit {
   date: string;
   author: string;
   subject: string;
+  searchText: string;
   add: number;
   del: number;
   impact: number;

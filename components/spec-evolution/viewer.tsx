@@ -149,6 +149,7 @@ function loadCommitsFromDb(db: SqlJsDatabase): Commit[] {
     date: r[3] as string,
     author: r[4] as string,
     subject: r[5] as string,
+    searchText: `${r[5] as string} ${r[1] as string} ${r[2] as string} ${r[4] as string}`.toLowerCase(),
     add: r[6] as number,
     del: r[7] as number,
     impact: r[8] as number,
@@ -635,12 +636,7 @@ function SpecEvolutionViewerInner() {
       if (!q) return true;
 
       const commit = row.original;
-      return (
-        commit.subject.toLowerCase().includes(q) ||
-        commit.hash.toLowerCase().includes(q) ||
-        commit.short.toLowerCase().includes(q) ||
-        commit.author.toLowerCase().includes(q)
-      );
+      return commit.searchText.includes(q);
     },
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
