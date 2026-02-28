@@ -1,6 +1,8 @@
 import React, { ReactNode } from "react";
 import { FrankenJargon } from "@/components/franken-jargon";
 
+export { navItems, siteConfig } from "@/lib/site-config";
+
 // ---------------------------------------------------------------------------
 // FrankenSQLite — Master content data
 // ---------------------------------------------------------------------------
@@ -18,32 +20,6 @@ export type ComparisonRow = {
   libsql: string;
   duckdb: string;
 };
-
-// ---- 1. Site config -------------------------------------------------------
-
-export const siteConfig = {
-  name: "FrankenSQLite",
-  title: "FrankenSQLite \u2014 The Monster Database Engine for Rust",
-  description:
-    "A clean-room Rust reimplementation of SQLite with MVCC concurrency, RaptorQ self-healing, and zero unsafe code. 26-crate workspace delivering the monster database engine.",
-  url: "https://frankensqlite.com",
-  github: "https://github.com/Dicklesworthstone/frankensqlite",
-  social: {
-    github: "https://github.com/Dicklesworthstone/frankensqlite",
-    x: "https://x.com/doodlestein",
-    authorGithub: "https://github.com/Dicklesworthstone",
-  },
-} as const;
-
-// ---- 2. Navigation --------------------------------------------------------
-
-export const navItems = [
-  { href: "/", label: "Home" },
-  { href: "/showcase", label: "Showcase" },
-  { href: "/architecture", label: "Architecture" },
-  { href: "/spec_evolution", label: "Spec Evolution" },
-  { href: "/getting-started", label: "Get Started" },
-] as const;
 
 // ---- 3. Hero stats --------------------------------------------------------
 

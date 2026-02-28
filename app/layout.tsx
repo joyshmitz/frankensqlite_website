@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { siteConfig } from "@/lib/content";
+import { siteConfig } from "@/lib/site-config";
 import ClientShell from "@/components/client-shell";
 import "./globals.css";
 

@@ -2,7 +2,7 @@
 
 import { Github, Twitter, ArrowUp, Activity } from "lucide-react";
 import Link from "next/link";
-import { siteConfig, navItems } from "@/lib/content";
+import { siteConfig, navItems } from "@/lib/site-config";
 import { FrankenContainer } from "./franken-elements";
 import { Magnetic } from "./motion-wrapper";
 import FrankenGlitch from "./franken-glitch";

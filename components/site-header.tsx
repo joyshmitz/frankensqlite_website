@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Menu, X, Eye, Home, Cpu, Zap, ChevronRight, Image as ImageIcon, FlaskConical } from "lucide-react";
 import { useState, useEffect } from "react";
-import { navItems, siteConfig } from "@/lib/content";
+import { navItems, siteConfig } from "@/lib/site-config";
 import { useBodyScrollLock } from "@/hooks/use-body-scroll-lock";
 import { cn } from "@/lib/utils";
 import { FrankenBolt, NeuralPulse } from "./franken-elements";
