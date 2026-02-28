@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -17,7 +17,12 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import dayjs from "dayjs";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useStore } from "@tanstack/react-store";
 import { Store } from "@tanstack/store";
 import {
@@ -50,6 +55,17 @@ type ViewerBootstrap = {
   commits: Commit[];
   groups: Map<string, number[]>;
   startIdx: number;
+};
+
+type EChartsLike = {
+  setOption: (option: unknown, notMerge?: boolean) => void;
+  resize: () => void;
+  dispose: () => void;
+};
+
+type EvolutionMapSegment = {
+  bucketId: number;
+  ratio: number;
 };
 
 type CommitSortMode = "latest" | "oldest" | "impact" | "author";
@@ -251,6 +267,20 @@ async function getPatch(db: SqlJsDatabase, idx: number): Promise<string> {
   return p;
 }
 
+function getAllPatches(db: SqlJsDatabase): Map<number, string> {
+  const allPatches = new Map<number, string>();
+  const res = db.exec("SELECT idx, patch FROM patches ORDER BY idx ASC");
+  if (!res.length) return allPatches;
+
+  for (const row of res[0].values) {
+    const idx = row[0] as number;
+    const patch = (row[1] as string) || "";
+    allPatches.set(idx, patch);
+    if (!patchCache.has(idx)) patchCache.set(idx, patch);
+  }
+  return allPatches;
+}
+
 async function reconstructSnapshot(
   db: SqlJsDatabase,
   idx: number,
@@ -285,9 +315,10 @@ async function computeAllMetrics(
   baseDoc: string
 ): Promise<MetricsEntry[]> {
   const metrics: MetricsEntry[] = [];
+  const allPatches = getAllPatches(db);
   let lines = baseDoc.split("\n");
   for (let i = 0; i < commits.length; i++) {
-    const p = await getPatch(db, i);
+    const p = allPatches.get(i) ?? "";
     if (p) lines = applySynapticPatch(lines, p);
     const text = lines.join("\n");
     const tokens = text.split(/\s+/).length;
@@ -324,7 +355,7 @@ function enhanceTables(root: HTMLElement) {
 // Viewer Component
 // ---------------------------------------------------------------------------
 
-export default function SpecEvolutionViewer() {
+function SpecEvolutionViewerInner() {
   const viewerStoreRef = useRef<Store<ViewerState> | null>(null);
   if (!viewerStoreRef.current) {
     viewerStoreRef.current = new Store(createInitialViewerState());
@@ -356,10 +387,14 @@ export default function SpecEvolutionViewer() {
   const specContentRef = useRef<HTMLDivElement>(null);
   const initSelectionRef = useRef(false);
   const echartsRef = useRef<{
-    velocity: unknown;
-    dist: unknown;
-    mass: unknown;
+    velocity: EChartsLike | null;
+    dist: EChartsLike | null;
+    mass: EChartsLike | null;
   }>({ velocity: null, dist: null, mass: null });
+  const mapBackgroundCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const drawEvolutionMapRef = useRef<() => void>(() => {});
+  const resizeRafRef = useRef<number | null>(null);
+  const currentIdxRef = useRef(currentIdx);
   const renderNonceRef = useRef(0);
 
   const queryClient = useQueryClient();
@@ -375,6 +410,76 @@ export default function SpecEvolutionViewer() {
   const groups = bootstrapQuery.data?.groups ?? EMPTY_GROUPS;
   const db = bootstrapQuery.data?.db ?? null;
   const baseDoc = bootstrapQuery.data?.baseDoc ?? "";
+
+  const velocityChartData = useMemo(
+    () => commits.map((commit) => [commit.date, commit.impact] as [string, number]),
+    [commits]
+  );
+
+  const distributionChartData = useMemo(() => {
+    const counts: Record<number, number> = {};
+    for (const commit of commits) {
+      counts[commit.primary] = (counts[commit.primary] || 0) + 1;
+    }
+
+    return BUCKETS.map((bucket) => ({
+      value: counts[bucket.id] || 0,
+      name: bucket.name,
+      itemStyle: { color: bucket.color },
+    }));
+  }, [commits]);
+
+  const massChartData = useMemo(() => {
+    const bucketsByDay: Record<string, Record<number, number>> = {};
+    for (const commit of commits) {
+      const dayKey = dayjs(commit.date).format("YYYY-MM-DD");
+      if (!bucketsByDay[dayKey]) bucketsByDay[dayKey] = {};
+      bucketsByDay[dayKey][commit.primary] =
+        (bucketsByDay[dayKey][commit.primary] || 0) + commit.impact;
+    }
+
+    const labels = Object.keys(bucketsByDay).sort();
+    const series = BUCKETS.map((bucket) => ({
+      name: bucket.name,
+      type: "bar" as const,
+      stack: "total",
+      itemStyle: { color: bucket.color },
+      data: labels.map((label) => bucketsByDay[label][bucket.id] || 0),
+    }));
+
+    return { labels, series };
+  }, [commits]);
+
+  const bucketColorById = useMemo(() => {
+    const colors = new Map<number, string>();
+    for (const bucket of BUCKETS) colors.set(bucket.id, bucket.color);
+    return colors;
+  }, []);
+
+  const evolutionMapStacks = useMemo<EvolutionMapSegment[][]>(
+    () =>
+      commits.map((commit) => {
+        const labels = groups.get(commit.hash) || commit.labels;
+        const bucketIds = labels.length ? labels : [10];
+        const counts: Record<number, number> = {};
+
+        for (const label of bucketIds) {
+          counts[label] = (counts[label] || 0) + 1;
+        }
+
+        const orderedBucketIds = Object.keys(counts).map((key) => Number(key));
+        const total = bucketIds.length || 1;
+        return orderedBucketIds.map((bucketId) => ({
+          bucketId,
+          ratio: counts[bucketId] / total,
+        }));
+      }),
+    [commits, groups]
+  );
+
+  useEffect(() => {
+    currentIdxRef.current = currentIdx;
+  }, [currentIdx]);
 
   useEffect(() => {
     if (!bootstrapQuery.data || initSelectionRef.current) return;
@@ -400,7 +505,7 @@ export default function SpecEvolutionViewer() {
   const metricsQuery = useQuery({
     queryKey: QUERY_KEYS.metrics,
     queryFn: () => computeAllMetrics(db!, commits, baseDoc),
-    enabled: Boolean(db && commits.length > 0),
+    enabled: Boolean(db && commits.length > 0 && tab === "timeline"),
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -416,7 +521,7 @@ export default function SpecEvolutionViewer() {
   const snapshotQuery = useQuery({
     queryKey: QUERY_KEYS.snapshot(currentIdx),
     queryFn: () => reconstructSnapshot(db!, currentIdx, baseDoc),
-    enabled: Boolean(db && commits.length > 0),
+    enabled: Boolean(db && commits.length > 0 && tab === "spec"),
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -424,7 +529,7 @@ export default function SpecEvolutionViewer() {
   const patchQuery = useQuery({
     queryKey: QUERY_KEYS.patch(currentIdx),
     queryFn: () => getPatch(db!, currentIdx),
-    enabled: Boolean(db && commits.length > 0),
+    enabled: Boolean(db && commits.length > 0 && (tab === "spec" || tab === "diff")),
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -432,25 +537,54 @@ export default function SpecEvolutionViewer() {
   useEffect(() => {
     if (!db || commits.length === 0) return;
 
-    const neighbors = [currentIdx - 1, currentIdx + 1].filter(
+    const neighborIdxs = [currentIdx - 1, currentIdx + 1].filter(
       (idx) => idx >= 0 && idx < commits.length
     );
 
-    neighbors.forEach((idx) => {
+    neighborIdxs.forEach((idx) => {
       queryClient.prefetchQuery({
         queryKey: QUERY_KEYS.patch(idx),
         queryFn: () => getPatch(db, idx),
         staleTime: Infinity,
         gcTime: Infinity,
       });
+    });
 
+    const nextIdx = currentIdx + 1;
+    if (nextIdx < 0 || nextIdx >= commits.length) return;
+
+    let cleanup: (() => void) | undefined;
+    const prefetchSnapshot = () => {
       queryClient.prefetchQuery({
-        queryKey: QUERY_KEYS.snapshot(idx),
-        queryFn: () => reconstructSnapshot(db, idx, baseDoc),
+        queryKey: QUERY_KEYS.snapshot(nextIdx),
+        queryFn: () => reconstructSnapshot(db, nextIdx, baseDoc),
         staleTime: Infinity,
         gcTime: Infinity,
       });
-    });
+    };
+
+    const requestIdle = (window as Window & typeof globalThis & {
+      requestIdleCallback?: (
+        callback: IdleRequestCallback,
+        options?: IdleRequestOptions
+      ) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    }).requestIdleCallback;
+    const cancelIdle = (window as Window & typeof globalThis & {
+      cancelIdleCallback?: (handle: number) => void;
+    }).cancelIdleCallback;
+
+    if (typeof requestIdle === "function" && typeof cancelIdle === "function") {
+      const idleId = requestIdle(prefetchSnapshot, {
+        timeout: 1200,
+      });
+      cleanup = () => cancelIdle(idleId);
+    } else {
+      const timeoutId = window.setTimeout(prefetchSnapshot, 200);
+      cleanup = () => window.clearTimeout(timeoutId);
+    }
+
+    return cleanup;
   }, [queryClient, db, baseDoc, commits.length, currentIdx]);
 
   // ── TanStack Table: bucket filtering + search + sorting ──────────────
@@ -642,8 +776,10 @@ export default function SpecEvolutionViewer() {
   useEffect(() => {
     if (tab !== "timeline" || metrics.length === 0 || commits.length === 0) return;
 
+    let cancelled = false;
     async function renderCharts() {
       const echarts = await import("echarts");
+      if (cancelled) return;
 
       const baseTheme = {
         backgroundColor: "transparent",
@@ -654,110 +790,93 @@ export default function SpecEvolutionViewer() {
         grid: { top: 30, bottom: 30, left: 40, right: 20 },
       };
 
-      // Velocity chart
       if (chartVelocityRef.current) {
         if (!echartsRef.current.velocity) {
-          echartsRef.current.velocity = echarts.init(chartVelocityRef.current);
+          echartsRef.current.velocity = echarts.init(
+            chartVelocityRef.current
+          ) as EChartsLike;
         }
-        const chart = echartsRef.current.velocity as ReturnType<typeof echarts.init>;
-        chart.setOption({
-          ...baseTheme,
-          xAxis: {
-            type: "category" as const,
-            axisLine: { lineStyle: { color: "#27272a" } },
-            splitLine: { show: false },
-          },
-          yAxis: {
-            type: "value" as const,
-            axisLine: { lineStyle: { color: "#27272a" } },
-            splitLine: { lineStyle: { color: "#27272a" } },
-          },
-          series: [
-            {
-              data: commits.map((c) => [c.date, c.impact]),
-              type: "line",
-              smooth: true,
-              lineStyle: { color: "#14b8a6", width: 2 },
-              markLine: {
-                symbol: ["none", "none"],
-                label: { show: false },
-                data: [{ xAxis: commits[currentIdx]?.date }],
-                lineStyle: {
-                  color: "rgba(255, 255, 255, 0.4)",
-                  type: "dashed" as const,
+
+        echartsRef.current.velocity.setOption(
+          {
+            ...baseTheme,
+            xAxis: {
+              type: "category" as const,
+              axisLine: { lineStyle: { color: "#27272a" } },
+              splitLine: { show: false },
+            },
+            yAxis: {
+              type: "value" as const,
+              axisLine: { lineStyle: { color: "#27272a" } },
+              splitLine: { lineStyle: { color: "#27272a" } },
+            },
+            series: [
+              {
+                id: "velocity-series",
+                data: velocityChartData,
+                type: "line",
+                smooth: true,
+                lineStyle: { color: "#14b8a6", width: 2 },
+                markLine: {
+                  symbol: ["none", "none"],
+                  label: { show: false },
+                  data: [{ xAxis: velocityChartData[currentIdxRef.current]?.[0] }],
+                  lineStyle: {
+                    color: "rgba(255, 255, 255, 0.4)",
+                    type: "dashed" as const,
+                  },
+                },
+                areaStyle: {
+                  color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                    { offset: 0, color: "rgba(20, 184, 166, 0.2)" },
+                    { offset: 1, color: "rgba(20, 184, 166, 0)" },
+                  ]),
                 },
               },
-              areaStyle: {
-                color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                  { offset: 0, color: "rgba(20, 184, 166, 0.2)" },
-                  { offset: 1, color: "rgba(20, 184, 166, 0)" },
-                ]),
-              },
-            },
-          ],
-        });
+            ],
+          },
+          true
+        );
       }
 
-      // Distribution chart
       if (chartDistRef.current) {
         if (!echartsRef.current.dist) {
-          echartsRef.current.dist = echarts.init(chartDistRef.current);
+          echartsRef.current.dist = echarts.init(chartDistRef.current) as EChartsLike;
         }
-        const chart = echartsRef.current.dist as ReturnType<typeof echarts.init>;
-        const counts: Record<number, number> = {};
-        commits.forEach((c) => {
-          counts[c.primary] = (counts[c.primary] || 0) + 1;
-        });
-        chart.setOption({
-          ...baseTheme,
-          series: [
-            {
-              type: "pie",
-              radius: ["50%", "80%"],
-              itemStyle: {
-                borderRadius: 5,
-                borderColor: "#020a05",
-                borderWidth: 2,
+
+        echartsRef.current.dist.setOption(
+          {
+            ...baseTheme,
+            series: [
+              {
+                type: "pie",
+                radius: ["50%", "80%"],
+                itemStyle: {
+                  borderRadius: 5,
+                  borderColor: "#020a05",
+                  borderWidth: 2,
+                },
+                label: { show: false },
+                data: distributionChartData,
               },
-              label: { show: false },
-              data: BUCKETS.map((b) => ({
-                value: counts[b.id] || 0,
-                name: b.name,
-                itemStyle: { color: b.color },
-              })),
-            },
-          ],
-        });
+            ],
+          },
+          true
+        );
       }
 
-      // Mass growth chart
       if (chartMassRef.current) {
         if (!echartsRef.current.mass) {
-          echartsRef.current.mass = echarts.init(chartMassRef.current);
+          echartsRef.current.mass = echarts.init(chartMassRef.current) as EChartsLike;
         }
-        const chart = echartsRef.current.mass as ReturnType<typeof echarts.init>;
-        const buckets: Record<string, Record<number, number>> = {};
-        commits.forEach((c) => {
-          const d = dayjs(c.date);
-          const k = d.format("YYYY-MM-DD");
-          if (!buckets[k]) buckets[k] = {};
-          buckets[k][c.primary] = (buckets[k][c.primary] || 0) + c.impact;
-        });
-        const labels = Object.keys(buckets).sort();
-        const series = BUCKETS.map((b) => ({
-          name: b.name,
-          type: "bar" as const,
-          stack: "total",
-          itemStyle: { color: b.color },
-          data: labels.map((l) => buckets[l][b.id] || 0),
-        }));
-        chart.setOption(
+
+        echartsRef.current.mass.setOption(
           {
             ...baseTheme,
             tooltip: { trigger: "axis" },
             xAxis: {
               type: "category" as const,
-              data: labels,
+              data: massChartData.labels,
               axisLine: { lineStyle: { color: "#27272a" } },
             },
             yAxis: {
@@ -765,7 +884,7 @@ export default function SpecEvolutionViewer() {
               axisLine: { lineStyle: { color: "#27272a" } },
               splitLine: { lineStyle: { color: "#27272a" } },
             },
-            series,
+            series: massChartData.series,
           },
           true
         );
@@ -773,78 +892,154 @@ export default function SpecEvolutionViewer() {
     }
 
     renderCharts();
-  }, [tab, metrics, commits, currentIdx]);
-
-  // Resize charts on window resize
-  useEffect(() => {
-    function handleResize() {
-      const refs = echartsRef.current;
-      if (refs.velocity) (refs.velocity as { resize: () => void }).resize();
-      if (refs.dist) (refs.dist as { resize: () => void }).resize();
-      if (refs.mass) (refs.mass as { resize: () => void }).resize();
-    }
-    window.addEventListener("resize", handleResize);
     return () => {
-      window.removeEventListener("resize", handleResize);
-      // Dispose ECharts instances on unmount to free canvas/bindng memory
-      const refs = echartsRef.current;
-      if (refs.velocity) (refs.velocity as { dispose: () => void }).dispose();
-      if (refs.dist) (refs.dist as { dispose: () => void }).dispose();
-      if (refs.mass) (refs.mass as { dispose: () => void }).dispose();
-      echartsRef.current = { velocity: null, dist: null, mass: null };
+      cancelled = true;
     };
-  }, []);
+  }, [
+    tab,
+    metrics.length,
+    commits.length,
+    velocityChartData,
+    distributionChartData,
+    massChartData,
+  ]);
+
+  useEffect(() => {
+    if (tab !== "timeline" || commits.length === 0) return;
+    const chart = echartsRef.current.velocity;
+    if (!chart) return;
+
+    const selectedDate = commits[currentIdx]?.date;
+    if (!selectedDate) return;
+
+    chart.setOption({
+      series: [
+        {
+          id: "velocity-series",
+          markLine: {
+            symbol: ["none", "none"],
+            label: { show: false },
+            data: [{ xAxis: selectedDate }],
+            lineStyle: {
+              color: "rgba(255, 255, 255, 0.4)",
+              type: "dashed" as const,
+            },
+          },
+        },
+      ],
+    });
+  }, [tab, commits, currentIdx]);
 
   // ── Draw evolution map canvas ───────────────────────────────────────
   const drawEvolutionMap = useCallback(() => {
     const cvs = canvasRef.current;
     if (!cvs || commits.length === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const cw = cvs.clientWidth;
+    const ch = cvs.clientHeight;
+    if (!cw || !ch) return;
+
+    const widthPx = Math.max(1, Math.round(cw * dpr));
+    const heightPx = Math.max(1, Math.round(ch * dpr));
+    if (cvs.width !== widthPx || cvs.height !== heightPx) {
+      cvs.width = widthPx;
+      cvs.height = heightPx;
+      mapBackgroundCanvasRef.current = null;
+    }
+
     const ctx = cvs.getContext("2d");
     if (!ctx) return;
 
-    cvs.width = cvs.clientWidth * (window.devicePixelRatio || 1);
-    cvs.height = cvs.clientHeight * (window.devicePixelRatio || 1);
-    ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+    let background = mapBackgroundCanvasRef.current;
+    if (!background || background.width !== widthPx || background.height !== heightPx) {
+      background = document.createElement("canvas");
+      background.width = widthPx;
+      background.height = heightPx;
 
-    const cw = cvs.clientWidth;
-    const ch = cvs.clientHeight;
+      const bgCtx = background.getContext("2d");
+      if (!bgCtx) return;
 
-    if (!cw || !ch) return;
-    ctx.clearRect(0, 0, cw, ch);
+      bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      bgCtx.clearRect(0, 0, cw, ch);
 
-    const barW = cw / commits.length;
-    commits.forEach((c, i) => {
-      const labels = groups.get(c.hash) || c.labels;
-      const bucketIds = labels.length ? labels : [10];
-      const counts: Record<number, number> = {};
-      bucketIds.forEach((l) => {
-        counts[l] = (counts[l] || 0) + 1;
-      });
-      const total = bucketIds.length;
-      let cy = 0;
-      Object.keys(counts).forEach((l) => {
-        const b = BUCKETS.find((x) => x.id === Number(l)) || BUCKETS[9];
-        const sh = (counts[Number(l)] / total) * ch;
-        ctx.fillStyle = b.color;
-        ctx.fillRect(i * barW, cy, Math.max(1, barW), sh);
-        cy += sh;
-      });
-    });
+      const barW = cw / commits.length;
+      for (let i = 0; i < evolutionMapStacks.length; i++) {
+        const stack = evolutionMapStacks[i];
+        let cy = 0;
 
-    // Draw current position indicator
-    const indicatorX = (currentIdx / commits.length) * cw;
+        for (let j = 0; j < stack.length; j++) {
+          const segment = stack[j];
+          const sh = segment.ratio * ch;
+          bgCtx.fillStyle = bucketColorById.get(segment.bucketId) || BUCKETS[9].color;
+          bgCtx.fillRect(i * barW, cy, Math.max(1, barW), sh);
+          cy += sh;
+        }
+      }
+
+      mapBackgroundCanvasRef.current = background;
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, widthPx, heightPx);
+    ctx.drawImage(background, 0, 0);
+
+    const indicatorWidth = Math.max(2, Math.round(2 * dpr));
+    const indicatorX = Math.round(((currentIdx / commits.length) * cw) * dpr);
     ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
-    ctx.fillRect(indicatorX - 1, 0, 2, ch);
-  }, [commits, groups, currentIdx]);
+    ctx.fillRect(
+      indicatorX - Math.floor(indicatorWidth / 2),
+      0,
+      indicatorWidth,
+      heightPx
+    );
+  }, [commits.length, currentIdx, evolutionMapStacks, bucketColorById]);
+
+  useEffect(() => {
+    mapBackgroundCanvasRef.current = null;
+  }, [evolutionMapStacks]);
+
+  useEffect(() => {
+    drawEvolutionMapRef.current = drawEvolutionMap;
+  }, [drawEvolutionMap]);
 
   useEffect(() => {
     drawEvolutionMap();
   }, [drawEvolutionMap]);
 
   useEffect(() => {
-    window.addEventListener("resize", drawEvolutionMap);
-    return () => window.removeEventListener("resize", drawEvolutionMap);
-  }, [drawEvolutionMap]);
+    function runResizeWork() {
+      const refs = echartsRef.current;
+      refs.velocity?.resize();
+      refs.dist?.resize();
+      refs.mass?.resize();
+      drawEvolutionMapRef.current();
+    }
+
+    function handleResize() {
+      if (resizeRafRef.current !== null) return;
+      resizeRafRef.current = window.requestAnimationFrame(() => {
+        resizeRafRef.current = null;
+        runResizeWork();
+      });
+    }
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      if (resizeRafRef.current !== null) {
+        window.cancelAnimationFrame(resizeRafRef.current);
+        resizeRafRef.current = null;
+      }
+
+      const refs = echartsRef.current;
+      refs.velocity?.dispose();
+      refs.dist?.dispose();
+      refs.mass?.dispose();
+      echartsRef.current = { velocity: null, dist: null, mass: null };
+    };
+  }, []);
 
   // ── Navigation ──────────────────────────────────────────────────────
 
@@ -1506,5 +1701,27 @@ export default function SpecEvolutionViewer() {
         )}
       </AnimatePresence>
     </>
+  );
+}
+
+export default function SpecEvolutionViewer() {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: Infinity,
+            gcTime: Infinity,
+            refetchOnWindowFocus: false,
+            retry: 1,
+          },
+        },
+      })
+  );
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <SpecEvolutionViewerInner />
+    </QueryClientProvider>
   );
 }

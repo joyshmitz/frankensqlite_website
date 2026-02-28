@@ -26,6 +26,7 @@ import { Magnetic, BorderBeam } from "@/components/motion-wrapper";
 import { FrankenJargon } from "@/components/franken-jargon";
 import FeatureGrid from "@/components/feature-grid";
 import Timeline from "@/components/timeline";
+import { useIntersectionObserver } from "@/hooks/use-intersection-observer";
 import {
   siteConfig,
   heroStats,
@@ -45,26 +46,46 @@ function VizSkeleton() {
   );
 }
 
+function DeferredViz({
+  children,
+  minHeight = 400,
+}: {
+  children: React.ReactNode;
+  minHeight?: number;
+}) {
+  const { ref, isIntersecting } = useIntersectionObserver<HTMLDivElement>({
+    threshold: 0.01,
+    rootMargin: "600px 0px",
+    triggerOnce: true,
+  });
+
+  return (
+    <div ref={ref}>
+      {isIntersecting ? children : <div style={{ minHeight }}><VizSkeleton /></div>}
+    </div>
+  );
+}
+
 // Lazy-load visualizations — these are heavy client components
-const MvccRace = dynamic(() => import("@/components/viz/mvcc-race"), { ssr: false, loading: VizSkeleton });
-const CowBtree = dynamic(() => import("@/components/viz/cow-btree"), { ssr: false, loading: VizSkeleton });
-const BTreePageExplorer = dynamic(() => import("@/components/viz/btree-page-explorer"), { ssr: false, loading: VizSkeleton });
-const LearnedIndex = dynamic(() => import("@/components/viz/learned-index"), { ssr: false, loading: VizSkeleton });
-const DatabaseCracking = dynamic(() => import("@/components/viz/database-cracking"), { ssr: false, loading: VizSkeleton });
-const WalLanes = dynamic(() => import("@/components/viz/wal-lanes"), { ssr: false, loading: VizSkeleton });
-const CoolingProtocol = dynamic(() => import("@/components/viz/cooling-protocol"), { ssr: false, loading: VizSkeleton });
-const RaptorQHealing = dynamic(() => import("@/components/viz/raptorq-healing"), { ssr: false, loading: VizSkeleton });
-const SsiValidation = dynamic(() => import("@/components/viz/ssi-validation"), { ssr: false, loading: VizSkeleton });
-const SafeMergeLadder = dynamic(() => import("@/components/viz/safe-merge-ladder"), { ssr: false, loading: VizSkeleton });
-const EcsStream = dynamic(() => import("@/components/viz/ecs-stream"), { ssr: false, loading: VizSkeleton });
-const VdbeBytecode = dynamic(() => import("@/components/viz/vdbe-bytecode"), { ssr: false, loading: VizSkeleton });
-const SafetyDashboard = dynamic(() => import("@/components/viz/safety-dashboard"), { ssr: false, loading: VizSkeleton });
-const EncryptionPipeline = dynamic(() => import("@/components/viz/encryption-pipeline"), { ssr: false, loading: VizSkeleton });
-const TimelineProfiler = dynamic(() => import("@/components/viz/timeline-profiler"), { ssr: false, loading: VizSkeleton });
-const WitnessPlane = dynamic(() => import("@/components/viz/witness-plane"), { ssr: false, loading: VizSkeleton });
-const NewtypePattern = dynamic(() => import("@/components/viz/newtype-pattern"), { ssr: false, loading: VizSkeleton });
-const FrankenMermaidDiagram = dynamic(() => import("@/components/frankenmermaid-diagram"), { ssr: false, loading: VizSkeleton });
-const FrankenFlywheel = dynamic(() => import("@/components/franken-flywheel"), { ssr: false, loading: VizSkeleton });
+const MvccRace = dynamic(() => import("@/components/viz/mvcc-race"), { ssr: false, loading: () => <VizSkeleton /> });
+const CowBtree = dynamic(() => import("@/components/viz/cow-btree"), { ssr: false, loading: () => <VizSkeleton /> });
+const BTreePageExplorer = dynamic(() => import("@/components/viz/btree-page-explorer"), { ssr: false, loading: () => <VizSkeleton /> });
+const LearnedIndex = dynamic(() => import("@/components/viz/learned-index"), { ssr: false, loading: () => <VizSkeleton /> });
+const DatabaseCracking = dynamic(() => import("@/components/viz/database-cracking"), { ssr: false, loading: () => <VizSkeleton /> });
+const WalLanes = dynamic(() => import("@/components/viz/wal-lanes"), { ssr: false, loading: () => <VizSkeleton /> });
+const CoolingProtocol = dynamic(() => import("@/components/viz/cooling-protocol"), { ssr: false, loading: () => <VizSkeleton /> });
+const RaptorQHealing = dynamic(() => import("@/components/viz/raptorq-healing"), { ssr: false, loading: () => <VizSkeleton /> });
+const SsiValidation = dynamic(() => import("@/components/viz/ssi-validation"), { ssr: false, loading: () => <VizSkeleton /> });
+const SafeMergeLadder = dynamic(() => import("@/components/viz/safe-merge-ladder"), { ssr: false, loading: () => <VizSkeleton /> });
+const EcsStream = dynamic(() => import("@/components/viz/ecs-stream"), { ssr: false, loading: () => <VizSkeleton /> });
+const VdbeBytecode = dynamic(() => import("@/components/viz/vdbe-bytecode"), { ssr: false, loading: () => <VizSkeleton /> });
+const SafetyDashboard = dynamic(() => import("@/components/viz/safety-dashboard"), { ssr: false, loading: () => <VizSkeleton /> });
+const EncryptionPipeline = dynamic(() => import("@/components/viz/encryption-pipeline"), { ssr: false, loading: () => <VizSkeleton /> });
+const TimelineProfiler = dynamic(() => import("@/components/viz/timeline-profiler"), { ssr: false, loading: () => <VizSkeleton /> });
+const WitnessPlane = dynamic(() => import("@/components/viz/witness-plane"), { ssr: false, loading: () => <VizSkeleton /> });
+const NewtypePattern = dynamic(() => import("@/components/viz/newtype-pattern"), { ssr: false, loading: () => <VizSkeleton /> });
+const FrankenMermaidDiagram = dynamic(() => import("@/components/frankenmermaid-diagram"), { ssr: false, loading: () => <VizSkeleton /> });
+const FrankenFlywheel = dynamic(() => import("@/components/franken-flywheel"), { ssr: false, loading: () => <VizSkeleton /> });
 
 export default function HomePage() {
   const prefersReducedMotion = useReducedMotion();
@@ -239,7 +260,9 @@ export default function HomePage() {
           </>
         }
       >
-        <CowBtree />
+        <DeferredViz>
+          <CowBtree />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -258,7 +281,9 @@ export default function HomePage() {
           </>
         }
       >
-        <BTreePageExplorer />
+        <DeferredViz>
+          <BTreePageExplorer />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -277,7 +302,9 @@ export default function HomePage() {
           </>
         }
       >
-        <LearnedIndex />
+        <DeferredViz>
+          <LearnedIndex />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -296,7 +323,9 @@ export default function HomePage() {
           </>
         }
       >
-        <DatabaseCracking />
+        <DeferredViz>
+          <DatabaseCracking />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -315,7 +344,9 @@ export default function HomePage() {
           </>
         }
       >
-        <CoolingProtocol />
+        <DeferredViz>
+          <CoolingProtocol />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -334,7 +365,9 @@ export default function HomePage() {
           </>
         }
       >
-        <WalLanes />
+        <DeferredViz>
+          <WalLanes />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -353,7 +386,9 @@ export default function HomePage() {
           </>
         }
       >
-        <RaptorQHealing />
+        <DeferredViz>
+          <RaptorQHealing />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -372,7 +407,9 @@ export default function HomePage() {
           </>
         }
       >
-        <EcsStream />
+        <DeferredViz>
+          <EcsStream />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -392,8 +429,12 @@ export default function HomePage() {
         }
       >
         <div className="flex flex-col gap-8">
-          <WitnessPlane />
-          <SsiValidation />
+          <DeferredViz>
+            <WitnessPlane />
+          </DeferredViz>
+          <DeferredViz>
+            <SsiValidation />
+          </DeferredViz>
         </div>
       </SectionShell>
 
@@ -413,7 +454,9 @@ export default function HomePage() {
           </>
         }
       >
-        <SafeMergeLadder />
+        <DeferredViz>
+          <SafeMergeLadder />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -432,7 +475,9 @@ export default function HomePage() {
           </>
         }
       >
-        <TimelineProfiler />
+        <DeferredViz>
+          <TimelineProfiler />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -452,8 +497,12 @@ export default function HomePage() {
         }
       >
         <div className="flex flex-col gap-8">
-          <SafetyDashboard />
-          <NewtypePattern />
+          <DeferredViz>
+            <SafetyDashboard />
+          </DeferredViz>
+          <DeferredViz>
+            <NewtypePattern />
+          </DeferredViz>
         </div>
       </SectionShell>
 
@@ -473,7 +522,9 @@ export default function HomePage() {
           </>
         }
       >
-        <EncryptionPipeline />
+        <DeferredViz>
+          <EncryptionPipeline />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -492,7 +543,9 @@ export default function HomePage() {
           </>
         }
       >
-        <VdbeBytecode />
+        <DeferredViz>
+          <VdbeBytecode />
+        </DeferredViz>
       </SectionShell>
 
       {/* ================================================================
@@ -683,7 +736,9 @@ export default function HomePage() {
             </p>
           </div>
 
-          <FrankenFlywheel />
+          <DeferredViz minHeight={520}>
+            <FrankenFlywheel />
+          </DeferredViz>
 
           <div className="mt-20 grid lg:grid-cols-2 gap-16 items-center">
             <div className="space-y-8 text-left">

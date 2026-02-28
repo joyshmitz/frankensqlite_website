@@ -1,15 +1,21 @@
 "use client";
 
 import { useEffect } from "react";
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import SiteHeader from "@/components/site-header";
 import SiteFooter from "@/components/site-footer";
 import ErrorBoundary from "@/components/error-boundary";
 import ScrollToTop from "@/components/scroll-to-top";
-import CustomCursor from "@/components/custom-cursor";
 import { SiteProvider } from "@/lib/site-state";
-import SignalHUD from "@/components/signal-hud";
+
+const CustomCursor = dynamic(() => import("@/components/custom-cursor"), {
+  ssr: false,
+});
+const SignalHUD = dynamic(() => import("@/components/signal-hud"), {
+  ssr: false,
+});
 
 export default function ClientShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
