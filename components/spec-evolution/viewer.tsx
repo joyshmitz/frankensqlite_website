@@ -648,6 +648,13 @@ function SpecEvolutionViewerInner() {
     () => filteredRows.map((row) => row.original),
     [filteredRows]
   );
+  const filteredIndexByCommitIdx = useMemo(() => {
+    const indexMap = new Map<number, number>();
+    filtered.forEach((commit, idx) => {
+      indexMap.set(commit.idx, idx);
+    });
+    return indexMap;
+  }, [filtered]);
 
   const currentCommit = commits[currentIdx] ?? null;
 
@@ -660,8 +667,8 @@ function SpecEvolutionViewerInner() {
   });
 
   const selectedFilteredIdx = useMemo(
-    () => filtered.findIndex((c) => c.idx === currentIdx),
-    [filtered, currentIdx]
+    () => filteredIndexByCommitIdx.get(currentIdx) ?? -1,
+    [filteredIndexByCommitIdx, currentIdx]
   );
 
   useEffect(() => {
@@ -1134,22 +1141,22 @@ function SpecEvolutionViewerInner() {
   );
 
   const goPrev = useCallback(() => {
-    const currentFilterIdx = filtered.findIndex((c) => c.idx === currentIdx);
+    const currentFilterIdx = filteredIndexByCommitIdx.get(currentIdx) ?? -1;
     if (currentFilterIdx > 0) {
       selectCommit(filtered[currentFilterIdx - 1].idx);
     } else if (currentFilterIdx === -1 && filtered.length > 0) {
       selectCommit(filtered[0].idx);
     }
-  }, [filtered, currentIdx, selectCommit]);
+  }, [filtered, filteredIndexByCommitIdx, currentIdx, selectCommit]);
 
   const goNext = useCallback(() => {
-    const currentFilterIdx = filtered.findIndex((c) => c.idx === currentIdx);
+    const currentFilterIdx = filteredIndexByCommitIdx.get(currentIdx) ?? -1;
     if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
       selectCommit(filtered[currentFilterIdx + 1].idx);
     } else if (currentFilterIdx === -1 && filtered.length > 0) {
       selectCommit(filtered[0].idx);
     }
-  }, [filtered, currentIdx, selectCommit]);
+  }, [filtered, filteredIndexByCommitIdx, currentIdx, selectCommit]);
 
   // ── Playback ────────────────────────────────────────────────────────
 
@@ -1179,7 +1186,7 @@ function SpecEvolutionViewerInner() {
 
     playIntervalRef.current = setInterval(() => {
       viewerStore.setState((state) => {
-        const currentFilterIdx = filtered.findIndex((c) => c.idx === state.currentIdx);
+        const currentFilterIdx = filteredIndexByCommitIdx.get(state.currentIdx) ?? -1;
 
         if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
           const target = filtered[currentFilterIdx + 1].idx;
@@ -1212,7 +1219,7 @@ function SpecEvolutionViewerInner() {
         playIntervalRef.current = null;
       }
     };
-  }, [playing, filtered, viewerStore]);
+  }, [playing, filtered, filteredIndexByCommitIdx, viewerStore]);
 
   // ── Keyboard shortcuts ──────────────────────────────────────────────
 
