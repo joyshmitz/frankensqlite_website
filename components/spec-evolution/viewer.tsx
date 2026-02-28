@@ -109,6 +109,8 @@ const QUERY_KEYS = {
 let dbInstance: SqlJsDatabase | null = null;
 const docCache = new Map<number, string>();
 const patchCache = new Map<number, string>();
+const specHtmlCache = new Map<number, string>();
+const diffHtmlCache = new Map<string, string>();
 
 async function loadDatabase(): Promise<SqlJsDatabase> {
   if (dbInstance) return dbInstance;
@@ -661,6 +663,15 @@ function SpecEvolutionViewerInner() {
       specLineCount: text.split("\n").length,
     }));
 
+    const cachedSpecHtml = specHtmlCache.get(currentIdx);
+    if (cachedSpecHtml !== undefined) {
+      viewerStore.setState((state) => ({
+        ...state,
+        specHtml: cachedSpecHtml,
+      }));
+      return;
+    }
+
     async function render() {
       try {
         const { marked } = await import("marked");
@@ -668,20 +679,23 @@ function SpecEvolutionViewerInner() {
         if (nonce !== renderNonceRef.current) return;
 
         const html = DOMPurify.sanitize(await marked.parse(text));
+        specHtmlCache.set(currentIdx, html);
         viewerStore.setState((state) => ({
           ...state,
           specHtml: html,
         }));
       } catch {
+        const fallbackHtml = `<pre class=\"spec-fallback-pre\">${escapeHtml(text)}</pre>`;
+        specHtmlCache.set(currentIdx, fallbackHtml);
         viewerStore.setState((state) => ({
           ...state,
-          specHtml: `<pre class=\"spec-fallback-pre\">${escapeHtml(text)}</pre>`,
+          specHtml: fallbackHtml,
         }));
       }
     }
 
     render();
-  }, [tab, snapshotQuery.data, viewerStore]);
+  }, [tab, snapshotQuery.data, currentIdx, viewerStore]);
 
   // Post-process spec HTML (enhance tables, highlight diffs)
   useEffect(() => {
@@ -734,12 +748,24 @@ function SpecEvolutionViewerInner() {
 
     const patch = patchQuery.data;
     const nonce = ++renderNonceRef.current;
+    const diffCacheKey = `${currentIdx}:${diffMode}`;
+
+    const cachedDiffHtml = diffHtmlCache.get(diffCacheKey);
+    if (cachedDiffHtml !== undefined) {
+      viewerStore.setState((state) => ({
+        ...state,
+        diffHtml: cachedDiffHtml,
+      }));
+      return;
+    }
 
     async function render() {
       if (!patch) {
+        const noDiffHtml = '<div class="no-delta">NO DELTA</div>';
+        diffHtmlCache.set(diffCacheKey, noDiffHtml);
         viewerStore.setState((state) => ({
           ...state,
-          diffHtml: '<div class="no-delta">NO DELTA</div>',
+          diffHtml: noDiffHtml,
         }));
         return;
       }
@@ -757,20 +783,24 @@ function SpecEvolutionViewerInner() {
           colorScheme: ColorSchemeType.DARK,
         });
 
+        const sanitized = DOMPurify.sanitize(rendered);
+        diffHtmlCache.set(diffCacheKey, sanitized);
         viewerStore.setState((state) => ({
           ...state,
-          diffHtml: DOMPurify.sanitize(rendered),
+          diffHtml: sanitized,
         }));
       } catch {
+        const fallbackHtml = `<pre class=\"spec-fallback-pre\">${escapeHtml(patch)}</pre>`;
+        diffHtmlCache.set(diffCacheKey, fallbackHtml);
         viewerStore.setState((state) => ({
           ...state,
-          diffHtml: `<pre class=\"spec-fallback-pre\">${escapeHtml(patch)}</pre>`,
+          diffHtml: fallbackHtml,
         }));
       }
     }
 
     render();
-  }, [tab, patchQuery.data, diffMode, viewerStore]);
+  }, [tab, patchQuery.data, currentIdx, diffMode, viewerStore]);
 
   // ── Render charts ───────────────────────────────────────────────────
   useEffect(() => {
