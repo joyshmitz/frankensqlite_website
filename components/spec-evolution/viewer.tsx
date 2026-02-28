@@ -111,6 +111,8 @@ const docCache = new Map<number, string>();
 const patchCache = new Map<number, string>();
 const specHtmlCache = new Map<number, string>();
 const diffHtmlCache = new Map<string, string>();
+const specLineCountCache = new Map<number, number>();
+const addedPatchLinesCache = new Map<number, Set<string>>();
 
 async function loadDatabase(): Promise<SqlJsDatabase> {
   if (dbInstance) return dbInstance;
@@ -179,7 +181,7 @@ function getInitialCommitIndex(totalCommits: number): number {
   const hash = window.location.hash;
   if (hash.startsWith("#entry-")) {
     const requested = parseInt(hash.replace("#entry-", ""), 10);
-    if (!isNaN(requested) && requested >= 0 && requested < totalCommits) {
+    if (!Number.isNaN(requested) && requested >= 0 && requested < totalCommits) {
       startIdx = requested;
     }
   }
@@ -267,6 +269,30 @@ async function getPatch(db: SqlJsDatabase, idx: number): Promise<string> {
   const p = res.length ? (res[0].values[0][0] as string) : "";
   patchCache.set(idx, p);
   return p;
+}
+
+function getSpecLineCount(idx: number, text: string): number {
+  const cached = specLineCountCache.get(idx);
+  if (cached !== undefined) return cached;
+
+  const count = text.split("\n").length;
+  specLineCountCache.set(idx, count);
+  return count;
+}
+
+function getAddedPatchLines(idx: number, patch: string): Set<string> {
+  const cached = addedPatchLinesCache.get(idx);
+  if (cached) return cached;
+
+  const addedLines = new Set<string>();
+  for (const line of patch.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    const content = stripMd(line.slice(1));
+    if (content.length > 6) addedLines.add(content);
+  }
+
+  addedPatchLinesCache.set(idx, addedLines);
+  return addedLines;
 }
 
 function getAllPatches(db: SqlJsDatabase): Map<number, string> {
@@ -657,20 +683,34 @@ function SpecEvolutionViewerInner() {
 
     const text = snapshotQuery.data;
     const nonce = ++renderNonceRef.current;
-
-    viewerStore.setState((state) => ({
-      ...state,
-      specLineCount: text.split("\n").length,
-    }));
+    const lineCount = getSpecLineCount(currentIdx, text);
 
     const cachedSpecHtml = specHtmlCache.get(currentIdx);
     if (cachedSpecHtml !== undefined) {
-      viewerStore.setState((state) => ({
-        ...state,
-        specHtml: cachedSpecHtml,
-      }));
+      viewerStore.setState((state) => {
+        if (
+          state.specLineCount === lineCount &&
+          state.specHtml === cachedSpecHtml
+        ) {
+          return state;
+        }
+
+        return {
+          ...state,
+          specLineCount: lineCount,
+          specHtml: cachedSpecHtml,
+        };
+      });
       return;
     }
+
+    viewerStore.setState((state) => {
+      if (state.specLineCount === lineCount) return state;
+      return {
+        ...state,
+        specLineCount: lineCount,
+      };
+    });
 
     async function render() {
       try {
@@ -680,17 +720,23 @@ function SpecEvolutionViewerInner() {
 
         const html = DOMPurify.sanitize(await marked.parse(text));
         specHtmlCache.set(currentIdx, html);
-        viewerStore.setState((state) => ({
-          ...state,
-          specHtml: html,
-        }));
+        viewerStore.setState((state) => {
+          if (state.specHtml === html) return state;
+          return {
+            ...state,
+            specHtml: html,
+          };
+        });
       } catch {
         const fallbackHtml = `<pre class=\"spec-fallback-pre\">${escapeHtml(text)}</pre>`;
         specHtmlCache.set(currentIdx, fallbackHtml);
-        viewerStore.setState((state) => ({
-          ...state,
-          specHtml: fallbackHtml,
-        }));
+        viewerStore.setState((state) => {
+          if (state.specHtml === fallbackHtml) return state;
+          return {
+            ...state,
+            specHtml: fallbackHtml,
+          };
+        });
       }
     }
 
@@ -706,13 +752,7 @@ function SpecEvolutionViewerInner() {
     const patch = patchQuery.data;
     if (!patch || !specContentRef.current) return;
 
-    const addedLines = new Set<string>();
-    patch.split("\n").forEach((line) => {
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        const content = stripMd(line.slice(1));
-        if (content.length > 6) addedLines.add(content);
-      }
-    });
+    const addedLines = getAddedPatchLines(currentIdx, patch);
     if (addedLines.size === 0) return;
 
     const walker = document.createTreeWalker(
@@ -739,7 +779,7 @@ function SpecEvolutionViewerInner() {
         n.parentNode.replaceChild(span, n);
       }
     });
-  }, [tab, specHtml, patchQuery.data]);
+  }, [tab, specHtml, currentIdx, patchQuery.data]);
 
   // ── Render diff when currentIdx or tab changes ──────────────────────
   useEffect(() => {
@@ -752,10 +792,13 @@ function SpecEvolutionViewerInner() {
 
     const cachedDiffHtml = diffHtmlCache.get(diffCacheKey);
     if (cachedDiffHtml !== undefined) {
-      viewerStore.setState((state) => ({
-        ...state,
-        diffHtml: cachedDiffHtml,
-      }));
+      viewerStore.setState((state) => {
+        if (state.diffHtml === cachedDiffHtml) return state;
+        return {
+          ...state,
+          diffHtml: cachedDiffHtml,
+        };
+      });
       return;
     }
 
@@ -763,10 +806,13 @@ function SpecEvolutionViewerInner() {
       if (!patch) {
         const noDiffHtml = '<div class="no-delta">NO DELTA</div>';
         diffHtmlCache.set(diffCacheKey, noDiffHtml);
-        viewerStore.setState((state) => ({
-          ...state,
-          diffHtml: noDiffHtml,
-        }));
+        viewerStore.setState((state) => {
+          if (state.diffHtml === noDiffHtml) return state;
+          return {
+            ...state,
+            diffHtml: noDiffHtml,
+          };
+        });
         return;
       }
 
@@ -785,17 +831,23 @@ function SpecEvolutionViewerInner() {
 
         const sanitized = DOMPurify.sanitize(rendered);
         diffHtmlCache.set(diffCacheKey, sanitized);
-        viewerStore.setState((state) => ({
-          ...state,
-          diffHtml: sanitized,
-        }));
+        viewerStore.setState((state) => {
+          if (state.diffHtml === sanitized) return state;
+          return {
+            ...state,
+            diffHtml: sanitized,
+          };
+        });
       } catch {
         const fallbackHtml = `<pre class=\"spec-fallback-pre\">${escapeHtml(patch)}</pre>`;
         diffHtmlCache.set(diffCacheKey, fallbackHtml);
-        viewerStore.setState((state) => ({
-          ...state,
-          diffHtml: fallbackHtml,
-        }));
+        viewerStore.setState((state) => {
+          if (state.diffHtml === fallbackHtml) return state;
+          return {
+            ...state,
+            diffHtml: fallbackHtml,
+          };
+        });
       }
     }
 
