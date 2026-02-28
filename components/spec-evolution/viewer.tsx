@@ -113,6 +113,32 @@ const specHtmlCache = new Map<number, string>();
 const diffHtmlCache = new Map<string, string>();
 const specLineCountCache = new Map<number, number>();
 const addedPatchLinesCache = new Map<number, Set<string>>();
+let markedModulePromise: Promise<typeof import("marked")> | null = null;
+let domPurifyModulePromise: Promise<typeof import("dompurify")> | null = null;
+let diff2htmlModulePromise: Promise<typeof import("diff2html")> | null = null;
+let diff2htmlTypesModulePromise: Promise<
+  typeof import("diff2html/lib/types")
+> | null = null;
+
+function getMarkedModule() {
+  markedModulePromise ??= import("marked");
+  return markedModulePromise;
+}
+
+function getDomPurifyModule() {
+  domPurifyModulePromise ??= import("dompurify");
+  return domPurifyModulePromise;
+}
+
+function getDiff2HtmlModule() {
+  diff2htmlModulePromise ??= import("diff2html");
+  return diff2htmlModulePromise;
+}
+
+function getDiff2HtmlTypesModule() {
+  diff2htmlTypesModulePromise ??= import("diff2html/lib/types");
+  return diff2htmlTypesModulePromise;
+}
 
 async function loadDatabase(): Promise<SqlJsDatabase> {
   if (dbInstance) return dbInstance;
@@ -717,8 +743,11 @@ function SpecEvolutionViewerInner() {
 
     async function render() {
       try {
-        const { marked } = await import("marked");
-        const DOMPurify = (await import("dompurify")).default;
+        const [{ marked }, domPurify] = await Promise.all([
+          getMarkedModule(),
+          getDomPurifyModule(),
+        ]);
+        const DOMPurify = domPurify.default;
         if (nonce !== renderNonceRef.current) return;
 
         const html = DOMPurify.sanitize(await marked.parse(text));
@@ -820,9 +849,12 @@ function SpecEvolutionViewerInner() {
       }
 
       try {
-        const diff2html = await import("diff2html");
-        const { ColorSchemeType } = await import("diff2html/lib/types");
-        const DOMPurify = (await import("dompurify")).default;
+        const [diff2html, { ColorSchemeType }, domPurify] = await Promise.all([
+          getDiff2HtmlModule(),
+          getDiff2HtmlTypesModule(),
+          getDomPurifyModule(),
+        ]);
+        const DOMPurify = domPurify.default;
         if (nonce !== renderNonceRef.current) return;
 
         const rendered = diff2html.html(patch, {
