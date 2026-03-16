@@ -15,14 +15,14 @@ function DataDebris({ x, y }: { x: MotionValue<number>; y: MotionValue<number> }
     duration: 1 + prng(i * 83.1) * 2, drift1: (prng(i * 97.3) - 0.5) * 20, drift2: (prng(i * 101.9) - 0.5) * 40,
   })), []);
   return (
-    <div className="absolute inset-0 pointer-events-none">
+    <motion.div className="absolute pointer-events-none" style={{ x, y }}>
       {particles.map((p) => (
         <motion.div key={p.id} className="absolute text-[8px] font-mono text-teal-500/40 select-none"
-          style={{ x, y, left: p.offsetX, top: p.offsetY }}
+          style={{ left: p.offsetX, top: p.offsetY }}
           animate={{ opacity: [0, 1, 0], y: [0, -20, -40], x: [0, p.drift1, p.drift2] }}
           transition={{ duration: p.duration, repeat: Infinity, ease: "linear" }}>{p.char}</motion.div>
       ))}
-    </div>
+    </motion.div>
   );
 }
 
