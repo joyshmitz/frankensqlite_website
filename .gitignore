@@ -37,3 +37,7 @@ npm-debug.log*
 tests/reports/
 test-results/
 playwright-report/
+
+# bv (beads viewer) local config and caches
+.bv/
+.claude/settings.local.json
