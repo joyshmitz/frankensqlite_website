@@ -682,6 +682,28 @@ function SpecEvolutionViewerInner() {
     return indexMap;
   }, [filtered]);
 
+  // Direct prev/next lookup maps for O(1) filtered navigation
+  const prevByCommitIdx = useMemo(() => {
+    const map = new Map<number, number>();
+    for (let i = 1; i < filtered.length; i++) {
+      map.set(filtered[i].idx, filtered[i - 1].idx);
+    }
+    return map;
+  }, [filtered]);
+
+  const nextByCommitIdx = useMemo(() => {
+    const map = new Map<number, number>();
+    for (let i = 0; i < filtered.length - 1; i++) {
+      map.set(filtered[i].idx, filtered[i + 1].idx);
+    }
+    return map;
+  }, [filtered]);
+
+  const firstFilteredIdx = useMemo(
+    () => filtered[0]?.idx,
+    [filtered]
+  );
+
   const currentCommit = commits[currentIdx] ?? null;
 
   // ── TanStack Virtual: sidebar list ────────────────────────────────────
@@ -1173,22 +1195,22 @@ function SpecEvolutionViewerInner() {
   );
 
   const goPrev = useCallback(() => {
-    const currentFilterIdx = filteredIndexByCommitIdx.get(currentIdx) ?? -1;
-    if (currentFilterIdx > 0) {
-      selectCommit(filtered[currentFilterIdx - 1].idx);
-    } else if (currentFilterIdx === -1 && filtered.length > 0) {
-      selectCommit(filtered[0].idx);
+    const prevIdx = prevByCommitIdx.get(currentIdx);
+    if (prevIdx !== undefined) {
+      selectCommit(prevIdx);
+    } else if (firstFilteredIdx !== undefined && filteredIndexByCommitIdx.get(currentIdx) === undefined) {
+      selectCommit(firstFilteredIdx);
     }
-  }, [filtered, filteredIndexByCommitIdx, currentIdx, selectCommit]);
+  }, [prevByCommitIdx, firstFilteredIdx, filteredIndexByCommitIdx, currentIdx, selectCommit]);
 
   const goNext = useCallback(() => {
-    const currentFilterIdx = filteredIndexByCommitIdx.get(currentIdx) ?? -1;
-    if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
-      selectCommit(filtered[currentFilterIdx + 1].idx);
-    } else if (currentFilterIdx === -1 && filtered.length > 0) {
-      selectCommit(filtered[0].idx);
+    const nextIdx = nextByCommitIdx.get(currentIdx);
+    if (nextIdx !== undefined) {
+      selectCommit(nextIdx);
+    } else if (firstFilteredIdx !== undefined && filteredIndexByCommitIdx.get(currentIdx) === undefined) {
+      selectCommit(firstFilteredIdx);
     }
-  }, [filtered, filteredIndexByCommitIdx, currentIdx, selectCommit]);
+  }, [nextByCommitIdx, firstFilteredIdx, filteredIndexByCommitIdx, currentIdx, selectCommit]);
 
   // ── Playback ────────────────────────────────────────────────────────
 
@@ -1208,7 +1230,7 @@ function SpecEvolutionViewerInner() {
       return;
     }
 
-    if (filtered.length === 0) {
+    if (firstFilteredIdx === undefined) {
       viewerStore.setState((state) => ({
         ...state,
         playing: false,
@@ -1218,26 +1240,25 @@ function SpecEvolutionViewerInner() {
 
     playIntervalRef.current = setInterval(() => {
       viewerStore.setState((state) => {
-        const currentFilterIdx = filteredIndexByCommitIdx.get(state.currentIdx) ?? -1;
-
-        if (currentFilterIdx !== -1 && currentFilterIdx < filtered.length - 1) {
-          const target = filtered[currentFilterIdx + 1].idx;
-          history.replaceState(null, "", `#entry-${target}`);
+        const nextIdx = nextByCommitIdx.get(state.currentIdx);
+        if (nextIdx !== undefined) {
+          history.replaceState(null, "", `#entry-${nextIdx}`);
           return {
             ...state,
-            currentIdx: target,
+            currentIdx: nextIdx,
           };
         }
 
-        if (currentFilterIdx === -1 && filtered.length > 0) {
-          const target = filtered[0].idx;
-          history.replaceState(null, "", `#entry-${target}`);
+        // Not in filtered list - jump to first filtered entry
+        if (filteredIndexByCommitIdx.get(state.currentIdx) === undefined && firstFilteredIdx !== undefined) {
+          history.replaceState(null, "", `#entry-${firstFilteredIdx}`);
           return {
             ...state,
-            currentIdx: target,
+            currentIdx: firstFilteredIdx,
           };
         }
 
+        // At end of filtered list - stop playing
         return {
           ...state,
           playing: false,
@@ -1251,7 +1272,7 @@ function SpecEvolutionViewerInner() {
         playIntervalRef.current = null;
       }
     };
-  }, [playing, filtered, filteredIndexByCommitIdx, viewerStore]);
+  }, [playing, firstFilteredIdx, nextByCommitIdx, filteredIndexByCommitIdx, viewerStore]);
 
   // ── Keyboard shortcuts ──────────────────────────────────────────────
 
