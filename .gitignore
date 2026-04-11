@@ -41,3 +41,17 @@ playwright-report/
 # bv (beads viewer) local config and caches
 .bv/
 .claude/settings.local.json
+
+# NTM session state
+.ntm/
+
+# Beads history snapshots (local only)
+.beads/.br_history/
+.beads/.br_recovery/
+
+# Per-machine IDE MCP client configs
+cline.mcp.json
+cursor.mcp.json
+gemini.mcp.json
+opencode.json
+windsurf.mcp.json
